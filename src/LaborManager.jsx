@@ -2,63 +2,71 @@ import React, { useState, useEffect } from 'react';
 import { 
   Users, Calendar, Check, X, Clock, Plus, Trash2, 
   DollarSign, Printer, Search, ChevronRight, ChevronLeft, UserPlus,
-  Gift, AlertCircle, Phone, FileText, MessageCircle, Droplet 
+  Gift, AlertCircle, Phone, FileText, MessageCircle, Droplet, Lock 
 } from 'lucide-react';
+// FIREBASE IMPORTS
+import { db } from './firebase-config';
+import { ref, onValue, push, remove, update, set } from 'firebase/database';
 
-export default function LaborManager() {
+export default function LaborManager({ isAdmin }) { // <--- RECEIVES ADMIN PROP
   
   // ==========================================
-  // 1. THE DATABASE
+  // 1. DATABASE & STATE (CLOUD CONNECTED)
   // ==========================================
   
-  const [workers, setWorkers] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_workers');
-    return saved ? JSON.parse(saved) : [
-      { id: 1, name: 'Raju Driver', role: 'Driver', rate: 500, phone: '9922...' },
-      { id: 2, name: 'Sham Helper', role: 'Helper', rate: 350, phone: '' }
-    ];
-  });
-
-  const [attendance, setAttendance] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_attendance');
-    return saved ? JSON.parse(saved) : {};
-  });
-
-  const [advances, setAdvances] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_labor_advances');
-    return saved ? JSON.parse(saved) : {};
-  });
-  
-  const [bonuses, setBonuses] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_labor_bonuses');
-    return saved ? JSON.parse(saved) : {};
-  });
+  const [workers, setWorkers] = useState([]);
+  const [attendance, setAttendance] = useState({});
+  const [advances, setAdvances] = useState({});
+  const [bonuses, setBonuses] = useState({});
 
   const [selectedWorker, setSelectedWorker] = useState(null);
   const [activeTab, setActiveTab] = useState('attendance'); 
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [newWorker, setNewWorker] = useState({ name: '', role: '', rate: '', phone: '' });
   const [moneyForm, setMoneyForm] = useState({ amount: '', reason: '', type: 'ADVANCE' }); 
-  const [inkSaver, setInkSaver] = useState(true); // Default Ink Saver ON
+  const [inkSaver, setInkSaver] = useState(true);
 
   // ==========================================
-  // 2. AUTO-SAVE
+  // 2. LIVE CLOUD CONNECTION
   // ==========================================
   
-  useEffect(() => { localStorage.setItem('baldigambar_workers', JSON.stringify(workers)); }, [workers]);
-  useEffect(() => { localStorage.setItem('baldigambar_attendance', JSON.stringify(attendance)); }, [attendance]);
-  useEffect(() => { localStorage.setItem('baldigambar_labor_advances', JSON.stringify(advances)); }, [advances]);
-  useEffect(() => { localStorage.setItem('baldigambar_labor_bonuses', JSON.stringify(bonuses)); }, [bonuses]);
+  useEffect(() => {
+    // 1. Listen to Workers
+    onValue(ref(db, 'workers'), (snapshot) => {
+      const data = snapshot.val();
+      // Convert object to array if needed, or keep as array if pushed that way
+      // We will handle both cases for robustness
+      const loaded = data ? Object.keys(data).map(key => ({ firebaseId: key, ...data[key] })) : [];
+      setWorkers(loaded);
+    });
+
+    // 2. Listen to Attendance
+    onValue(ref(db, 'attendance'), (snapshot) => {
+      const data = snapshot.val();
+      setAttendance(data || {});
+    });
+
+    // 3. Listen to Advances
+    onValue(ref(db, 'labor_advances'), (snapshot) => {
+      const data = snapshot.val();
+      setAdvances(data || {});
+    });
+    
+    // 4. Listen to Bonuses
+    onValue(ref(db, 'labor_bonuses'), (snapshot) => {
+      const data = snapshot.val();
+      setBonuses(data || {});
+    });
+  }, []);
 
   // ==========================================
-  // 3. LOGIC
+  // 3. ACTIONS (PROTECTED BY ADMIN)
   // ==========================================
 
   const markAttendance = (workerId, status) => {
-    setAttendance(prev => ({
-      ...prev,
-      [selectedDate]: { ...(prev[selectedDate] || {}), [workerId]: status }
-    }));
+    if (!isAdmin) return; // Lock
+    // Update specific date/worker path
+    update(ref(db, `attendance/${selectedDate}`), { [workerId]: status });
   };
 
   const changeDate = (days) => {
@@ -69,55 +77,88 @@ export default function LaborManager() {
 
   const addWorker = (e) => {
     e.preventDefault();
+    if (!isAdmin) return; // Lock
     if (!newWorker.name || !newWorker.rate) return;
+    
     const cleanName = newWorker.name.replace(/\b\w/g, l => l.toUpperCase());
     const cleanRole = newWorker.role.replace(/\b\w/g, l => l.toUpperCase()) || 'Helper';
-    setWorkers([...workers, { ...newWorker, name: cleanName, role: cleanRole, id: Date.now() }]);
+    
+    const workerData = { 
+      ...newWorker, 
+      id: Date.now(), // Keep local ID for logic consistency
+      name: cleanName, 
+      role: cleanRole 
+    };
+
+    push(ref(db, 'workers'), workerData);
     setNewWorker({ name: '', role: '', rate: '', phone: '' });
   };
 
-  const removeWorker = (id) => {
+  const removeWorker = (firebaseId, id) => {
+    if (!isAdmin) return; // Lock
     if (confirm("Remove this worker permanently?")) {
-      setWorkers(workers.filter(w => w.id !== id));
+      remove(ref(db, `workers/${firebaseId}`));
       if (selectedWorker?.id === id) setSelectedWorker(null);
     }
   };
 
   const addMoneyEntry = (e) => {
     e.preventDefault();
+    if (!isAdmin) return; // Lock
     if (!selectedWorker || !moneyForm.amount) return;
-    const newEntry = { id: Date.now(), date: new Date().toISOString().split('T')[0], amount: Number(moneyForm.amount), reason: moneyForm.reason };
+    
+    const newEntry = { 
+      id: Date.now(), 
+      date: new Date().toISOString().split('T')[0], 
+      amount: Number(moneyForm.amount), 
+      reason: moneyForm.reason 
+    };
+
     if (moneyForm.type === 'ADVANCE') {
-      setAdvances(prev => ({ ...prev, [selectedWorker.id]: [newEntry, ...(prev[selectedWorker.id] || [])] }));
+      push(ref(db, `labor_advances/${selectedWorker.id}`), newEntry);
     } else {
-      setBonuses(prev => ({ ...prev, [selectedWorker.id]: [newEntry, ...(prev[selectedWorker.id] || [])] }));
+      push(ref(db, `labor_bonuses/${selectedWorker.id}`), newEntry);
     }
     setMoneyForm({ amount: '', reason: '', type: 'ADVANCE' });
   };
 
-  const deleteMoneyEntry = (workerId, entryId, type) => {
+  const deleteMoneyEntry = (workerId, firebaseKey, type) => {
+    if (!isAdmin) return; // Lock
     if(!confirm("Delete this entry?")) return;
+    
     if (type === 'ADVANCE') {
-      setAdvances(prev => ({ ...prev, [workerId]: (prev[workerId] || []).filter(a => a.id !== entryId) }));
+      remove(ref(db, `labor_advances/${workerId}/${firebaseKey}`));
     } else {
-      setBonuses(prev => ({ ...prev, [workerId]: (prev[workerId] || []).filter(b => b.id !== entryId) }));
+      remove(ref(db, `labor_bonuses/${workerId}/${firebaseKey}`));
     }
   };
 
+  // --- STATS LOGIC ---
   const getWorkerStats = (id) => {
     let present = 0, half = 0, absent = 0;
-    Object.values(attendance).forEach(day => {
-      if (day[id] === 'P') present++;
-      if (day[id] === 'HD') half++;
-      if (day[id] === 'A') absent++;
+    
+    // Calculate Attendance from Cloud Object
+    Object.keys(attendance).forEach(date => {
+      const dayStatus = attendance[date][id];
+      if (dayStatus === 'P') present++;
+      if (dayStatus === 'HD') half++;
+      if (dayStatus === 'A') absent++;
     });
     
     const worker = workers.find(w => w.id === id);
+    if (!worker) return { present:0, half:0, absent:0, earned:0, totalAdvance:0, totalBonus:0, payable:0, historyDots:[] };
+
     const earned = (present * worker.rate) + (half * (worker.rate / 2));
-    const totalAdvance = (advances[id] || []).reduce((sum, a) => sum + a.amount, 0);
-    const totalBonus = (bonuses[id] || []).reduce((sum, b) => sum + b.amount, 0);
+    
+    // Calculate Advances/Bonuses (Convert Cloud Object to Array)
+    const workerAdvances = advances[id] ? Object.values(advances[id]) : [];
+    const workerBonuses = bonuses[id] ? Object.values(bonuses[id]) : [];
+    
+    const totalAdvance = workerAdvances.reduce((sum, a) => sum + Number(a.amount), 0);
+    const totalBonus = workerBonuses.reduce((sum, b) => sum + Number(b.amount), 0);
     const payable = earned + totalBonus - totalAdvance;
 
+    // History Dots
     const historyDots = [];
     for(let i=6; i>=0; i--) {
       const d = new Date();
@@ -230,9 +271,17 @@ export default function LaborManager() {
                     </div>
                   </div>
                   <div className="flex gap-2 w-full md:w-auto justify-end print:hidden">
-                    <button onClick={() => markAttendance(w.id, 'P')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'P' ? 'bg-green-600 border-green-600 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-green-400 hover:text-green-400'}`}>P</button>
-                    <button onClick={() => markAttendance(w.id, 'HD')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'HD' ? 'bg-yellow-500 border-yellow-500 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-yellow-400 hover:text-yellow-400'}`}>H</button>
-                    <button onClick={() => markAttendance(w.id, 'A')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'A' ? 'bg-red-500 border-red-500 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-red-400 hover:text-red-400'}`}>A</button>
+                    {isAdmin ? (
+                        <>
+                            <button onClick={() => markAttendance(w.id, 'P')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'P' ? 'bg-green-600 border-green-600 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-green-400 hover:text-green-400'}`}>P</button>
+                            <button onClick={() => markAttendance(w.id, 'HD')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'HD' ? 'bg-yellow-500 border-yellow-500 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-yellow-400 hover:text-yellow-400'}`}>H</button>
+                            <button onClick={() => markAttendance(w.id, 'A')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'A' ? 'bg-red-500 border-red-500 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-red-400 hover:text-red-400'}`}>A</button>
+                        </>
+                    ) : (
+                        <div className={`px-4 py-2 rounded-lg font-bold text-sm ${status === 'P' ? 'bg-green-100 text-green-700' : status === 'HD' ? 'bg-yellow-100 text-yellow-700' : status === 'A' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-400'}`}>
+                            {status === 'P' ? 'PRESENT' : status === 'HD' ? 'HALF DAY' : status === 'A' ? 'ABSENT' : 'NOT MARKED'}
+                        </div>
+                    )}
                   </div>
                   {/* Print Status Only */}
                   <div className="hidden print:block font-bold">
@@ -309,11 +358,18 @@ export default function LaborManager() {
                     <button onClick={() => setMoneyForm({...moneyForm, type: 'ADVANCE'})} className={`flex-1 py-2 rounded-lg font-bold text-sm ${moneyForm.type === 'ADVANCE' ? 'bg-red-50 text-red-600 border border-red-200' : 'text-slate-400 bg-slate-50'}`}>Give Advance (-)</button>
                     <button onClick={() => setMoneyForm({...moneyForm, type: 'BONUS'})} className={`flex-1 py-2 rounded-lg font-bold text-sm ${moneyForm.type === 'BONUS' ? 'bg-green-50 text-green-600 border border-green-200' : 'text-slate-400 bg-slate-50'}`}>Give Bonus (+)</button>
                   </div>
-                  <form onSubmit={addMoneyEntry} className="flex gap-3">
-                    <input type="number" placeholder="Amount (₹)" className="border-2 border-gray-100 p-3 rounded-xl font-bold w-32 focus:border-orange-500 outline-none text-lg" value={moneyForm.amount} onChange={e => setMoneyForm({...moneyForm, amount: e.target.value})} />
-                    <input type="text" placeholder={`Reason for ${moneyForm.type.toLowerCase()}...`} className="border-2 border-gray-100 p-3 rounded-xl font-bold flex-1 focus:border-orange-500 outline-none" value={moneyForm.reason} onChange={e => setMoneyForm({...moneyForm, reason: e.target.value})} />
-                    <button className={`text-white px-6 rounded-xl font-bold ${moneyForm.type === 'ADVANCE' ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}>Add</button>
-                  </form>
+                  
+                  {isAdmin ? (
+                    <form onSubmit={addMoneyEntry} className="flex gap-3">
+                        <input type="number" placeholder="Amount (₹)" className="border-2 border-gray-100 p-3 rounded-xl font-bold w-32 focus:border-orange-500 outline-none text-lg" value={moneyForm.amount} onChange={e => setMoneyForm({...moneyForm, amount: e.target.value})} />
+                        <input type="text" placeholder={`Reason for ${moneyForm.type.toLowerCase()}...`} className="border-2 border-gray-100 p-3 rounded-xl font-bold flex-1 focus:border-orange-500 outline-none" value={moneyForm.reason} onChange={e => setMoneyForm({...moneyForm, reason: e.target.value})} />
+                        <button className={`text-white px-6 rounded-xl font-bold ${moneyForm.type === 'ADVANCE' ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}>Add</button>
+                    </form>
+                  ) : (
+                    <div className="p-3 bg-slate-50 text-center rounded-xl border border-slate-200 font-bold text-slate-400 text-sm">
+                        <Lock size={16} className="inline mr-2"/> Login as Admin to add money entries
+                    </div>
+                  )}
                 </div>
 
                 <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
@@ -326,22 +382,34 @@ export default function LaborManager() {
                         <td className="p-4 text-right font-black text-slate-700">+ ₹{getWorkerStats(selectedWorker.id).earned}</td>
                         <td className="p-4 w-10"></td>
                       </tr>
-                      {(bonuses[selectedWorker.id] || []).map(b => (
-                        <tr key={b.id} className="hover:bg-green-50">
-                          <td className="p-4 font-bold text-green-700">{b.date}</td>
-                          <td className="p-4"><span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold uppercase">Bonus</span> <span className="text-gray-500 font-medium ml-2">{b.reason}</span></td>
-                          <td className="p-4 text-right font-black text-green-600">+ ₹{b.amount}</td>
-                          <td className="p-4 text-center"><button onClick={() => deleteMoneyEntry(selectedWorker.id, b.id, 'BONUS')} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button></td>
-                        </tr>
-                      ))}
-                      {(advances[selectedWorker.id] || []).map(a => (
-                        <tr key={a.id} className="hover:bg-red-50">
-                          <td className="p-4 font-bold text-red-700">{a.date}</td>
-                          <td className="p-4"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-bold uppercase">Advance</span> <span className="text-gray-500 font-medium ml-2">{a.reason}</span></td>
-                          <td className="p-4 text-right font-black text-red-600">- ₹{a.amount}</td>
-                          <td className="p-4 text-center"><button onClick={() => deleteMoneyEntry(selectedWorker.id, a.id, 'ADVANCE')} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button></td>
-                        </tr>
-                      ))}
+                      {/* FETCH FROM CLOUD OBJECT AND MAP */}
+                      {bonuses[selectedWorker.id] ? Object.keys(bonuses[selectedWorker.id]).map(key => {
+                          const b = bonuses[selectedWorker.id][key];
+                          return (
+                            <tr key={key} className="hover:bg-green-50">
+                            <td className="p-4 font-bold text-green-700">{b.date}</td>
+                            <td className="p-4"><span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold uppercase">Bonus</span> <span className="text-gray-500 font-medium ml-2">{b.reason}</span></td>
+                            <td className="p-4 text-right font-black text-green-600">+ ₹{b.amount}</td>
+                            <td className="p-4 text-center">
+                                {isAdmin && <button onClick={() => deleteMoneyEntry(selectedWorker.id, key, 'BONUS')} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>}
+                            </td>
+                            </tr>
+                          )
+                      }) : null}
+
+                      {advances[selectedWorker.id] ? Object.keys(advances[selectedWorker.id]).map(key => {
+                          const a = advances[selectedWorker.id][key];
+                          return (
+                            <tr key={key} className="hover:bg-red-50">
+                            <td className="p-4 font-bold text-red-700">{a.date}</td>
+                            <td className="p-4"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-bold uppercase">Advance</span> <span className="text-gray-500 font-medium ml-2">{a.reason}</span></td>
+                            <td className="p-4 text-right font-black text-red-600">- ₹{a.amount}</td>
+                            <td className="p-4 text-center">
+                                {isAdmin && <button onClick={() => deleteMoneyEntry(selectedWorker.id, key, 'ADVANCE')} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>}
+                            </td>
+                            </tr>
+                          )
+                      }) : null}
                     </tbody>
                   </table>
                 </div>
@@ -359,24 +427,31 @@ export default function LaborManager() {
       {activeTab === 'workers' && (
         <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm max-w-2xl mx-auto animate-fade-in">
           <h3 className="font-bold text-slate-700 uppercase mb-4 flex items-center gap-2"><UserPlus size={18}/> Add New Worker</h3>
-          <form onSubmit={addWorker} className="grid grid-cols-2 gap-4 mb-8">
-            <div className="col-span-2"><label className="text-xs font-bold text-gray-400 uppercase">Full Name</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.name} onChange={e => setNewWorker({...newWorker, name: e.target.value})} placeholder="e.g. Rahul Patil"/></div>
-            
-            {/* UNLIMITED ROLES INPUT */}
-            <div>
-              <label className="text-xs font-bold text-gray-400 uppercase">Role</label>
-              <input list="roleList" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={newWorker.role} onChange={e => setNewWorker({...newWorker, role: e.target.value})} placeholder="Type or Select..." />
-              <datalist id="roleList">
-                <option value="Driver"/><option value="Helper"/><option value="Mistri"/><option value="Supervisor"/><option value="Security"/><option value="Operator"/>
-              </datalist>
+          
+          {isAdmin ? (
+            <form onSubmit={addWorker} className="grid grid-cols-2 gap-4 mb-8">
+                <div className="col-span-2"><label className="text-xs font-bold text-gray-400 uppercase">Full Name</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.name} onChange={e => setNewWorker({...newWorker, name: e.target.value})} placeholder="e.g. Rahul Patil"/></div>
+                
+                {/* UNLIMITED ROLES INPUT */}
+                <div>
+                <label className="text-xs font-bold text-gray-400 uppercase">Role</label>
+                <input list="roleList" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={newWorker.role} onChange={e => setNewWorker({...newWorker, role: e.target.value})} placeholder="Type or Select..." />
+                <datalist id="roleList">
+                    <option value="Driver"/><option value="Helper"/><option value="Mistri"/><option value="Supervisor"/><option value="Security"/><option value="Operator"/>
+                </datalist>
+                </div>
+                
+                <div><label className="text-xs font-bold text-gray-400 uppercase">Daily Rate (₹)</label><input type="number" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.rate} onChange={e => setNewWorker({...newWorker, rate: e.target.value})} /></div>
+                
+                <div className="col-span-2"><label className="text-xs font-bold text-gray-400 uppercase">Mobile</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.phone} onChange={e => setNewWorker({...newWorker, phone: e.target.value})} placeholder="Optional for WhatsApp"/></div>
+                
+                <button className="col-span-2 bg-slate-900 text-white py-3 rounded-lg font-bold hover:bg-black">Save Worker</button>
+            </form>
+          ) : (
+            <div className="mb-8 p-4 bg-slate-50 border-2 border-dashed border-slate-200 rounded-xl text-center text-slate-400 font-bold text-sm">
+                Login as Admin to add new workers.
             </div>
-            
-            <div><label className="text-xs font-bold text-gray-400 uppercase">Daily Rate (₹)</label><input type="number" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.rate} onChange={e => setNewWorker({...newWorker, rate: e.target.value})} /></div>
-            
-            <div className="col-span-2"><label className="text-xs font-bold text-gray-400 uppercase">Mobile</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.phone} onChange={e => setNewWorker({...newWorker, phone: e.target.value})} placeholder="Optional for WhatsApp"/></div>
-            
-            <button className="col-span-2 bg-slate-900 text-white py-3 rounded-lg font-bold hover:bg-black">Save Worker</button>
-          </form>
+          )}
 
           <div className="space-y-2">
             <h4 className="font-bold text-gray-400 text-xs uppercase mb-2">Current Staff</h4>
@@ -388,7 +463,7 @@ export default function LaborManager() {
                 </div>
                 <div className="flex gap-2">
                   {w.phone && <a href={`https://wa.me/${w.phone}`} target="_blank" className="p-2 text-green-600 hover:bg-green-50 rounded-lg"><MessageCircle size={18}/></a>}
-                  <button onClick={() => removeWorker(w.id)} className="p-2 text-slate-300 hover:text-red-500"><Trash2 size={18}/></button>
+                  {isAdmin && <button onClick={() => removeWorker(w.firebaseId, w.id)} className="p-2 text-slate-300 hover:text-red-500"><Trash2 size={18}/></button>}
                 </div>
               </div>
             ))}

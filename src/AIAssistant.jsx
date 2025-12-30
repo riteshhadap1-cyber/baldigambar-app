@@ -1,173 +1,195 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sparkles, Send, Bot, User, TrendingUp, AlertTriangle, 
-  Wallet, Truck, Users, Box, ArrowRight 
+  CheckCircle, Loader, DollarSign, BrainCircuit 
 } from 'lucide-react';
+// FIREBASE IMPORTS
+import { db } from './firebase-config';
+import { ref, onValue } from 'firebase/database';
 
 export default function AIAssistant() {
+  
+  // ==========================================
+  // 1. LIVE DATA FEED (The "Brain" Context)
+  // ==========================================
+  const [businessData, setBusinessData] = useState({
+    pendingDues: 0,
+    cashBalance: 0,
+    activeWorkers: 0,
+    fleetStatus: 'Unknown',
+    highExpenseVehicle: 'None'
+  });
+
+  const [loadingData, setLoadingData] = useState(true);
+
+  useEffect(() => {
+    // We listen to all main nodes to build a "Mental Model" for the AI
+    const refs = {
+      invoices: ref(db, 'invoices'),
+      cashbook: ref(db, 'cashbook'),
+      workers: ref(db, 'attendance'),
+      fleet: ref(db, 'fleet_data')
+    };
+
+    const unsubInvoices = onValue(refs.invoices, (snap) => {
+      const data = snap.val() ? Object.values(snap.val()) : [];
+      // Calculate Pending Dues
+      const pending = data.reduce((sum, inv) => {
+        const total = (inv.items||[]).reduce((s,i)=>s+Number(i.amount),0);
+        const paid = Number(inv.advances || 0);
+        const due = total - paid;
+        return sum + (due > 0 ? due : 0);
+      }, 0);
+      
+      setBusinessData(prev => ({ ...prev, pendingDues: pending }));
+    });
+
+    const unsubCashbook = onValue(refs.cashbook, (snap) => {
+      const data = snap.val() ? Object.values(snap.val()) : [];
+      const income = data.filter(e => e.type === 'Income').reduce((s,e)=>s+Number(e.amount),0);
+      const expense = data.filter(e => e.type === 'Expense').reduce((s,e)=>s+Number(e.amount),0);
+      setBusinessData(prev => ({ ...prev, cashBalance: income - expense }));
+    });
+
+    const unsubFleet = onValue(refs.fleet, (snap) => {
+      const data = snap.val() || {};
+      // Find vehicle with highest fuel cost
+      let maxCost = 0;
+      let maxVehicle = 'None';
+      Object.entries(data).forEach(([name, details]) => {
+        const cost = Number(details.fuelCost || 0);
+        if(cost > maxCost) {
+          maxCost = cost;
+          maxVehicle = name;
+        }
+      });
+      setBusinessData(prev => ({ ...prev, highExpenseVehicle: maxVehicle }));
+    });
+
+    // Simulating "Data Ready" state
+    setTimeout(() => setLoadingData(false), 1500);
+
+    return () => { unsubInvoices(); unsubCashbook(); unsubFleet(); };
+  }, []);
+
+  // ==========================================
+  // 2. CHAT LOGIC
+  // ==========================================
   const [messages, setMessages] = useState([
-    { id: 1, sender: 'bot', text: "Hello Boss! I am the Baldigambar AI. I have analyzed your Fleet, Labor, and Accounts. What do you want to know?", type: 'intro' }
+    { role: 'ai', text: "Hello Ritesh! I am connected to your live Baldigambar Cloud Database. Ask me about pending payments, fleet costs, or cash flow." }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef(null);
 
-  // --- 1. LOAD ALL DATA (The "Brain") ---
-  const getData = () => {
-    return {
-      fleet: JSON.parse(localStorage.getItem('baldigambar_fleet_entries') || '[]'),
-      expenses: JSON.parse(localStorage.getItem('baldigambar_business_expenses') || '[]'), // Cashbook
-      invoices: JSON.parse(localStorage.getItem('baldigambar_invoices') || '[]'),
-      inventory: JSON.parse(localStorage.getItem('baldigambar_inventory') || '[]'),
-      workers: JSON.parse(localStorage.getItem('baldigambar_workers') || '[]'),
-      laborAdvances: JSON.parse(localStorage.getItem('baldigambar_labor_advances') || '{}')
-    };
-  };
+  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  useEffect(scrollToBottom, [messages]);
 
-  const scrollToBottom = () => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); };
-  useEffect(() => { scrollToBottom(); }, [messages, isTyping]);
+  const handleSend = async (e) => {
+    e.preventDefault();
+    if (!input.trim()) return;
 
-  // --- 2. THE INTELLIGENCE ENGINE ---
-  const analyzeData = (query) => {
-    const data = getData();
-    const q = query.toLowerCase();
-
-    // LOGIC: PROFIT & CASHFLOW
-    if (q.includes('profit') || q.includes('money') || q.includes('earning')) {
-      const totalIncome = data.expenses.filter(t => t.type === 'Income').reduce((sum, t) => sum + t.amount, 0);
-      const totalExpense = data.expenses.filter(t => t.type === 'Expense').reduce((sum, t) => sum + t.amount, 0);
-      const net = totalIncome - totalExpense;
-      const status = net >= 0 ? "Profit 🟢" : "Loss 🔴";
-      return `Based on your Cashbook:\n• Total Income: ₹${totalIncome.toLocaleString()}\n• Total Expense: ₹${totalExpense.toLocaleString()}\n----------------\nNet Status: ${status} ₹${Math.abs(net).toLocaleString()}`;
-    }
-
-    // LOGIC: PENDING PAYMENTS (COLLECTIONS)
-    if (q.includes('pending') || q.includes('owe') || q.includes('unpaid')) {
-      const pendingInvoices = data.invoices.reduce((sum, inv) => {
-         const total = inv.items.reduce((s,i) => s + i.amount, 0);
-         return sum + (total - (inv.advances || 0));
-      }, 0);
-      
-      const pendingDues = data.expenses.filter(e => e.type === 'Income' && e.status === 'Pending').length;
-      
-      if (pendingInvoices === 0 && pendingDues === 0) return "Great news! You have Zero pending collections. Everyone has paid.";
-      return `You have approx ₹${pendingInvoices.toLocaleString()} pending to collect from Invoices. Check the Billing Tab for details.`;
-    }
-
-    // LOGIC: FLEET ANALYSIS
-    if (q.includes('fleet') || q.includes('jcb') || q.includes('machine')) {
-      const topMachine = data.fleet.reduce((acc, curr) => {
-        acc[curr.machine] = (acc[curr.machine] || 0) + Number(curr.amount);
-        return acc;
-      }, {});
-      const best = Object.entries(topMachine).sort((a,b) => b[1]-a[1])[0];
-      
-      if (!best) return "No fleet data found yet.";
-      return `Your top performing machine is **${best[0]}** with total earnings of ₹${best[1].toLocaleString()}.`;
-    }
-
-    // LOGIC: INVENTORY ALERTS
-    if (q.includes('stock') || q.includes('inventory') || q.includes('buy')) {
-      const lowStock = data.inventory.filter(i => i.qty <= i.minLevel);
-      if (lowStock.length === 0) return "Inventory is healthy. Nothing to buy right now.";
-      return `⚠️ Alert: You need to buy these ${lowStock.length} items:\n` + lowStock.map(i => `• ${i.name} (Only ${i.qty} left)`).join('\n');
-    }
-
-    // LOGIC: LABOR/ADVANCES
-    if (q.includes('labor') || q.includes('worker') || q.includes('advance')) {
-      let totalAdv = 0;
-      Object.values(data.laborAdvances).forEach(list => list.forEach(a => totalAdv += a.amount));
-      return `You have given a total of **₹${totalAdv.toLocaleString()}** in advances to workers.`;
-    }
-
-    return "I am specialized in Baldigambar Business Data. Ask me about Profit, Fleet, Stocks, or Pending Payments.";
-  };
-
-  const handleSend = (text) => {
-    if (!text) return;
-    const userMsg = { id: Date.now(), sender: 'user', text: text };
-    setMessages(prev => [...prev, userMsg]);
+    const userMsg = input;
+    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
     setInput('');
     setIsTyping(true);
 
-    // Simulate "Thinking" time
+    // SIMULATED AI RESPONSE (Since we don't have a real OpenAI Key here)
+    // In a real app, you would send 'businessData' + 'userMsg' to GPT-4
     setTimeout(() => {
-      const responseText = analyzeData(text);
-      const botMsg = { id: Date.now() + 1, sender: 'bot', text: responseText };
-      setMessages(prev => [...prev, botMsg]);
+      let aiResponse = "I'm analyzing your request...";
+      const lower = userMsg.toLowerCase();
+
+      if (lower.includes('pending') || lower.includes('due') || lower.includes('money')) {
+        aiResponse = `Based on your live invoices, you have a total of ₹${businessData.pendingDues.toLocaleString()} pending from clients. You should check the Billing tab to send reminders.`;
+      } 
+      else if (lower.includes('cash') || lower.includes('balance') || lower.includes('bank')) {
+        aiResponse = `Your current Net Cash Balance (Income - Expense) is ₹${businessData.cashBalance.toLocaleString()}.`;
+        if(businessData.cashBalance < 0) aiResponse += " Warning: You are in negative cash flow.";
+      }
+      else if (lower.includes('fleet') || lower.includes('fuel') || lower.includes('vehicle')) {
+        aiResponse = `Your fleet data shows that ${businessData.highExpenseVehicle} has the highest fuel consumption right now. You might want to check its mileage or service status.`;
+      }
+      else if (lower.includes('hello') || lower.includes('hi')) {
+        aiResponse = "Welcome back, Boss! Your system is running smoothly on the Cloud. What data do you need?";
+      }
+      else {
+        aiResponse = "I can help you track Pending Dues, Cash Balance, or Fleet Expenses. Try asking 'How much money is pending?'";
+      }
+
+      setMessages(prev => [...prev, { role: 'ai', text: aiResponse }]);
       setIsTyping(false);
     }, 1000);
   };
 
-  // Quick Action Chips
-  const suggestions = [
-    { icon: <TrendingUp size={14}/>, text: "How is my Profit?" },
-    { icon: <AlertTriangle size={14}/>, text: "Any pending payments?" },
-    { icon: <Box size={14}/>, text: "Low stock alerts?" },
-    { icon: <Truck size={14}/>, text: "Best performing machine?" },
-    { icon: <Users size={14}/>, text: "Total Labor Advances?" },
-  ];
-
   return (
-    <div className="flex flex-col h-[calc(100vh-140px)] bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-fade-in font-sans">
+    <div className="h-[calc(100vh-140px)] flex flex-col bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-fade-in">
       
       {/* Header */}
-      <div className="bg-slate-900 p-4 flex items-center gap-3 text-white shadow-md z-10">
-        <div className="w-10 h-10 bg-gradient-to-tr from-orange-400 to-red-600 rounded-full flex items-center justify-center shadow-lg animate-pulse">
-          <Sparkles size={20} className="text-white"/>
-        </div>
-        <div>
-          <h2 className="font-black text-lg tracking-tight">Baldigambar AI</h2>
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Business Intelligence</p>
+      <div className="bg-slate-900 text-white p-4 flex justify-between items-center shadow-md">
+        <div className="flex items-center gap-3">
+           <div className="bg-orange-500 p-2 rounded-lg"><BrainCircuit size={20} className="text-white"/></div>
+           <div>
+             <h3 className="font-bold text-sm">Baldigambar AI</h3>
+             <p className="text-[10px] text-slate-400 font-bold flex items-center gap-1">
+               {loadingData ? <><Loader size={10} className="animate-spin"/> Syncing Data...</> : <><CheckCircle size={10} className="text-green-500"/> Live Cloud Data</>}
+             </p>
+           </div>
         </div>
       </div>
 
-      {/* Chat Area */}
+      {/* Messages Area */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
-        {messages.map((msg) => (
-          <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] p-4 rounded-2xl text-sm font-medium shadow-sm whitespace-pre-wrap leading-relaxed ${
-              msg.sender === 'user' 
-                ? 'bg-slate-800 text-white rounded-tr-none' 
-                : 'bg-white text-slate-700 border border-slate-200 rounded-tl-none'
-            }`}>
+        
+        {/* Insight Cards (Auto-Generated) */}
+        {!loadingData && messages.length === 1 && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+               <div className="flex items-center gap-2 mb-1 text-slate-400 text-xs font-bold uppercase"><AlertTriangle size={14} className="text-orange-500"/> Action Item</div>
+               <div className="font-bold text-slate-700">Collect Pending Dues</div>
+               <div className="text-2xl font-black text-slate-900">₹{businessData.pendingDues.toLocaleString()}</div>
+            </div>
+            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+               <div className="flex items-center gap-2 mb-1 text-slate-400 text-xs font-bold uppercase"><TrendingUp size={14} className="text-emerald-500"/> Current Health</div>
+               <div className="font-bold text-slate-700">Net Cash Balance</div>
+               <div className={`text-2xl font-black ${businessData.cashBalance >=0 ? 'text-emerald-600' : 'text-red-600'}`}>₹{businessData.cashBalance.toLocaleString()}</div>
+            </div>
+          </div>
+        )}
+
+        {messages.map((msg, i) => (
+          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[80%] p-4 rounded-2xl text-sm font-medium leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-slate-900 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
               {msg.text}
             </div>
           </div>
         ))}
         {isTyping && (
-          <div className="flex justify-start">
-            <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-slate-200 shadow-sm flex gap-1">
-              <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></span>
-              <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce delay-75"></span>
-              <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce delay-150"></span>
-            </div>
-          </div>
+           <div className="flex justify-start">
+             <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-slate-100 flex gap-1">
+               <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></span>
+               <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce delay-75"></span>
+               <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce delay-150"></span>
+             </div>
+           </div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Suggestions & Input */}
-      <div className="bg-white p-4 border-t border-slate-200">
-        <div className="flex gap-2 overflow-x-auto pb-3 no-scrollbar">
-          {suggestions.map((s, i) => (
-            <button key={i} onClick={() => handleSend(s.text)} className="flex items-center gap-2 px-3 py-2 bg-slate-50 hover:bg-orange-50 hover:text-orange-600 hover:border-orange-200 border border-slate-200 rounded-xl text-xs font-bold text-slate-500 transition-all whitespace-nowrap">
-              {s.icon} {s.text}
-            </button>
-          ))}
-        </div>
-        <form onSubmit={(e) => { e.preventDefault(); handleSend(input); }} className="relative flex items-center gap-2">
+      {/* Input Area */}
+      <form onSubmit={handleSend} className="p-4 bg-white border-t border-slate-200">
+        <div className="relative flex items-center gap-2">
           <input 
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about your business..."
-            className="w-full bg-slate-100 border-2 border-transparent focus:bg-white focus:border-slate-200 rounded-xl pl-4 pr-12 py-3 font-bold text-sm outline-none transition-all"
+            placeholder="Ask about your business..." 
+            className="w-full bg-slate-100 border-none rounded-xl py-3 pl-4 pr-12 font-bold text-slate-700 outline-none focus:ring-2 focus:ring-orange-100 placeholder:text-slate-400"
           />
-          <button type="submit" disabled={!input} className="absolute right-2 bg-slate-900 text-white p-2 rounded-lg hover:bg-black disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+          <button className="absolute right-2 p-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg transition-colors">
             <Send size={18} />
           </button>
-        </form>
-      </div>
+        </div>
+      </form>
     </div>
   );
 }

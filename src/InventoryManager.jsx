@@ -2,29 +2,20 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Box, Plus, Search, AlertTriangle, ArrowUp, ArrowDown, 
   Trash2, Package, CheckCircle, ShoppingCart, History, 
-  Filter, Printer, Droplet, DollarSign, Activity 
+  Filter, Printer, Droplet, DollarSign, Activity, X 
 } from 'lucide-react';
+// FIREBASE IMPORTS
+import { db } from './firebase-config';
+import { ref, onValue, push, remove, update } from 'firebase/database';
 
-export default function InventoryManager() {
+export default function InventoryManager({ isAdmin }) { // <--- RECEIVES ADMIN PROP
   
   // ==========================================
-  // 1. DATABASE & STATE
+  // 1. DATABASE & STATE (CLOUD CONNECTED)
   // ==========================================
   
-  const [items, setItems] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_inventory');
-    return saved ? JSON.parse(saved) : [
-      { id: 1, name: 'Engine Oil (15W40)', category: 'Oil', qty: 20, unit: 'Liters', minLevel: 10, price: 350 },
-      { id: 2, name: 'JCB Bucket Teeth', category: 'Spares', qty: 4, unit: 'Pcs', minLevel: 5, price: 1200 },
-      { id: 3, name: 'Hydraulic Oil', category: 'Oil', qty: 50, unit: 'Liters', minLevel: 20, price: 280 },
-      { id: 4, name: 'Grease Bucket', category: 'Consumable', qty: 2, unit: 'Bucket', minLevel: 1, price: 4500 }
-    ];
-  });
-
-  const [logs, setLogs] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_inventory_logs');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [items, setItems] = useState([]);
+  const [logs, setLogs] = useState([]);
 
   // UI State
   const [newItem, setNewItem] = useState({ name: '', category: 'Spares', qty: '', unit: 'Pcs', minLevel: '', price: '' });
@@ -35,10 +26,27 @@ export default function InventoryManager() {
   const [inkSaver, setInkSaver] = useState(true);
 
   // ==========================================
-  // 2. AUTO-SAVE
+  // 2. LIVE CLOUD CONNECTION
   // ==========================================
-  useEffect(() => { localStorage.setItem('baldigambar_inventory', JSON.stringify(items)); }, [items]);
-  useEffect(() => { localStorage.setItem('baldigambar_inventory_logs', JSON.stringify(logs)); }, [logs]);
+  useEffect(() => {
+    // Listen for Inventory Items
+    const itemsRef = ref(db, 'inventory');
+    onValue(itemsRef, (snapshot) => {
+      const data = snapshot.val();
+      const loaded = data ? Object.keys(data).map(key => ({ id: key, ...data[key] })) : [];
+      setItems(loaded);
+    });
+
+    // Listen for History Logs
+    const logsRef = ref(db, 'inventory_logs');
+    onValue(logsRef, (snapshot) => {
+      const data = snapshot.val();
+      const loaded = data ? Object.keys(data).map(key => ({ id: key, ...data[key] })) : [];
+      // Sort logs by newest first
+      loaded.sort((a, b) => b.timestamp - a.timestamp);
+      setLogs(loaded.slice(0, 50)); // Keep only last 50 locally
+    });
+  }, []);
 
   // ==========================================
   // 3. LOGIC & CALCULATIONS
@@ -46,58 +54,67 @@ export default function InventoryManager() {
 
   const categories = ['All', 'Spares', 'Oil', 'Consumable', 'Tools', 'Tyres'];
 
+  // Helper to push log to cloud
+  const pushLog = (itemName, action, qty) => {
+    push(ref(db, 'inventory_logs'), {
+      timestamp: Date.now(),
+      date: new Date().toLocaleString('en-IN'),
+      item: itemName,
+      action: action, // 'ADDED', 'USED', 'CREATED', 'DELETED'
+      qty: qty
+    });
+  };
+
   const addItem = (e) => {
     e.preventDefault();
+    if (!isAdmin) return; // Lock
     if (!newItem.name || !newItem.qty) return;
-    const item = { 
+    
+    const itemData = { 
       ...newItem, 
-      id: Date.now(), 
       qty: Number(newItem.qty), 
       minLevel: Number(newItem.minLevel) || 0,
       price: Number(newItem.price) || 0
     };
-    setItems([...items, item]);
-    addLog(item.name, 'CREATED', item.qty);
+
+    // Push to Cloud
+    push(ref(db, 'inventory'), itemData);
+    pushLog(newItem.name, 'CREATED', newItem.qty);
+    
     setNewItem({ name: '', category: 'Spares', qty: '', unit: 'Pcs', minLevel: '', price: '' });
   };
 
   const deleteItem = (id, name) => {
+    if (!isAdmin) return; // Lock
     if (confirm(`Delete ${name} permanently?`)) {
-      setItems(items.filter(i => i.id !== id));
+      remove(ref(db, `inventory/${id}`));
+      pushLog(name, 'DELETED', 0);
     }
-  };
-
-  const addLog = (itemName, action, qty) => {
-    const newLog = {
-      id: Date.now(),
-      date: new Date().toLocaleString('en-IN'),
-      item: itemName,
-      action: action, // 'ADDED' or 'REMOVED' or 'CREATED'
-      qty: qty
-    };
-    setLogs([newLog, ...logs].slice(0, 50)); // Keep last 50 logs
   };
 
   const handleStockUpdate = (e) => {
     e.preventDefault();
+    if (!isAdmin) return; // Lock
     if (!stockAction.qty) return;
-    const qtyChange = Number(stockAction.qty);
     
-    setItems(items.map(item => {
-      if (item.id === stockAction.id) {
-        const newQty = stockAction.type === 'ADD' ? item.qty + qtyChange : item.qty - qtyChange;
-        if (stockAction.type === 'ADD') addLog(item.name, 'ADDED', qtyChange);
-        else addLog(item.name, 'USED', qtyChange);
-        return { ...item, qty: Math.max(0, newQty) };
-      }
-      return item;
-    }));
+    const qtyChange = Number(stockAction.qty);
+    const item = items.find(i => i.id === stockAction.id);
+    
+    if (item) {
+      const newQty = stockAction.type === 'ADD' ? item.qty + qtyChange : item.qty - qtyChange;
+      const finalQty = Math.max(0, newQty);
+      
+      // Update Cloud
+      update(ref(db, `inventory/${stockAction.id}`), { qty: finalQty });
+      pushLog(item.name, stockAction.type === 'ADD' ? 'ADDED' : 'USED', qtyChange);
+    }
+    
     setStockAction({ id: null, type: '', qty: '' });
   };
 
   // Filter Logic
   const filteredItems = items.filter(i => {
-    const matchSearch = i.name.toLowerCase().includes(search.toLowerCase());
+    const matchSearch = (i.name || '').toLowerCase().includes(search.toLowerCase());
     const matchCat = activeCategory === 'All' || i.category === activeCategory;
     return matchSearch && matchCat;
   });
@@ -189,23 +206,31 @@ export default function InventoryManager() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         
-        {/* --- ADD NEW ITEM FORM --- */}
-        <div className="lg:col-span-1 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-fit no-print">
-          <h3 className="font-bold text-slate-700 uppercase mb-4 text-sm flex items-center gap-2"><Plus size={18}/> Add New Item</h3>
-          <form onSubmit={addItem} className="space-y-4">
-            <div><label className="text-xs font-bold text-slate-400 uppercase">Item Name</label><input className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold focus:border-orange-500 outline-none" placeholder="e.g. Air Filter" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} /></div>
-            <div className="grid grid-cols-2 gap-4">
-               <div><label className="text-xs font-bold text-slate-400 uppercase">Category</label><select className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold bg-white outline-none" value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})}><option>Spares</option><option>Oil</option><option>Consumable</option><option>Tools</option><option>Tyres</option></select></div>
-               <div><label className="text-xs font-bold text-slate-400 uppercase">Unit</label><select className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold bg-white outline-none" value={newItem.unit} onChange={e => setNewItem({...newItem, unit: e.target.value})}><option>Pcs</option><option>Liters</option><option>Kg</option><option>Bucket</option><option>Set</option></select></div>
+        {/* --- ADD NEW ITEM FORM (PROTECTED) --- */}
+        {isAdmin ? (
+            <div className="lg:col-span-1 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-fit no-print">
+            <h3 className="font-bold text-slate-700 uppercase mb-4 text-sm flex items-center gap-2"><Plus size={18}/> Add New Item</h3>
+            <form onSubmit={addItem} className="space-y-4">
+                <div><label className="text-xs font-bold text-slate-400 uppercase">Item Name</label><input className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold focus:border-orange-500 outline-none" placeholder="e.g. Air Filter" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} /></div>
+                <div className="grid grid-cols-2 gap-4">
+                <div><label className="text-xs font-bold text-slate-400 uppercase">Category</label><select className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold bg-white outline-none" value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})}><option>Spares</option><option>Oil</option><option>Consumable</option><option>Tools</option><option>Tyres</option></select></div>
+                <div><label className="text-xs font-bold text-slate-400 uppercase">Unit</label><select className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold bg-white outline-none" value={newItem.unit} onChange={e => setNewItem({...newItem, unit: e.target.value})}><option>Pcs</option><option>Liters</option><option>Kg</option><option>Bucket</option><option>Set</option></select></div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                <div><label className="text-xs font-bold text-slate-400 uppercase">Initial Qty</label><input type="number" className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold outline-none" placeholder="0" value={newItem.qty} onChange={e => setNewItem({...newItem, qty: e.target.value})} /></div>
+                <div><label className="text-xs font-bold text-slate-400 uppercase">Unit Price (₹)</label><input type="number" className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold outline-none" placeholder="₹" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} /></div>
+                </div>
+                <div><label className="text-xs font-bold text-slate-400 uppercase">Min Alert Level</label><input type="number" className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold outline-none text-red-400" placeholder="5" value={newItem.minLevel} onChange={e => setNewItem({...newItem, minLevel: e.target.value})} /></div>
+                <button className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-black shadow-lg">Save Item</button>
+            </form>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-               <div><label className="text-xs font-bold text-slate-400 uppercase">Initial Qty</label><input type="number" className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold outline-none" placeholder="0" value={newItem.qty} onChange={e => setNewItem({...newItem, qty: e.target.value})} /></div>
-               <div><label className="text-xs font-bold text-slate-400 uppercase">Unit Price (₹)</label><input type="number" className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold outline-none" placeholder="₹" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} /></div>
+        ) : (
+            <div className="lg:col-span-1 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-fit no-print flex flex-col items-center justify-center text-center">
+                <Box size={48} className="text-slate-300 mb-2"/>
+                <p className="text-slate-400 font-bold text-sm">Inventory Management Locked.</p>
+                <p className="text-slate-400 text-xs mt-1">Login as Admin to add items.</p>
             </div>
-            <div><label className="text-xs font-bold text-slate-400 uppercase">Min Alert Level</label><input type="number" className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold outline-none text-red-400" placeholder="5" value={newItem.minLevel} onChange={e => setNewItem({...newItem, minLevel: e.target.value})} /></div>
-            <button className="w-full bg-slate-900 text-white py-3 rounded-xl font-bold hover:bg-black shadow-lg">Save Item</button>
-          </form>
-        </div>
+        )}
 
         {/* --- INVENTORY LIST --- */}
         <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -252,18 +277,23 @@ export default function InventoryManager() {
                       }
                     </td>
                     <td className="p-4 text-right no-print">
-                       {stockAction.id === item.id ? (
-                         <div className="flex items-center justify-end gap-2 animate-fade-in bg-white shadow-lg p-2 rounded-xl absolute right-4 border border-orange-100 z-10">
-                           <input autoFocus type="number" className="w-16 border-2 border-orange-200 rounded-lg p-1 text-center font-bold outline-none" placeholder="Qty" value={stockAction.qty} onChange={e => setStockAction({...stockAction, qty: e.target.value})} />
-                           <button onClick={handleStockUpdate} className="bg-orange-600 text-white p-1.5 rounded-lg hover:bg-orange-700"><CheckCircle size={16}/></button>
-                           <button onClick={() => setStockAction({id:null, type:'', qty:''})} className="bg-slate-200 text-slate-500 p-1.5 rounded-lg hover:bg-slate-300"><X size={16}/></button>
-                         </div>
+                       {/* STOCK ACTIONS (PROTECTED) */}
+                       {isAdmin ? (
+                           stockAction.id === item.id ? (
+                            <div className="flex items-center justify-end gap-2 animate-fade-in bg-white shadow-lg p-2 rounded-xl absolute right-4 border border-orange-100 z-10">
+                              <input autoFocus type="number" className="w-16 border-2 border-orange-200 rounded-lg p-1 text-center font-bold outline-none" placeholder="Qty" value={stockAction.qty} onChange={e => setStockAction({...stockAction, qty: e.target.value})} />
+                              <button onClick={handleStockUpdate} className="bg-orange-600 text-white p-1.5 rounded-lg hover:bg-orange-700"><CheckCircle size={16}/></button>
+                              <button onClick={() => setStockAction({id:null, type:'', qty:''})} className="bg-slate-200 text-slate-500 p-1.5 rounded-lg hover:bg-slate-300"><X size={16}/></button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-end gap-2 opacity-100">
+                              <button onClick={() => setStockAction({id: item.id, type: 'ADD', qty: ''})} className="bg-green-50 text-green-600 hover:bg-green-600 hover:text-white p-2 rounded-lg transition-colors border border-green-100" title="Add Stock"><Plus size={16}/></button>
+                              <button onClick={() => setStockAction({id: item.id, type: 'REMOVE', qty: ''})} className="bg-red-50 text-red-600 hover:bg-red-600 hover:text-white p-2 rounded-lg transition-colors border border-red-100" title="Use/Remove Stock"><ArrowDown size={16}/></button>
+                              <button onClick={() => deleteItem(item.id, item.name)} className="bg-slate-50 text-slate-300 hover:bg-slate-200 hover:text-slate-500 p-2 rounded-lg ml-2"><Trash2 size={16}/></button>
+                            </div>
+                          )
                        ) : (
-                         <div className="flex items-center justify-end gap-2 opacity-100">
-                           <button onClick={() => setStockAction({id: item.id, type: 'ADD', qty: ''})} className="bg-green-50 text-green-600 hover:bg-green-600 hover:text-white p-2 rounded-lg transition-colors border border-green-100" title="Add Stock"><Plus size={16}/></button>
-                           <button onClick={() => setStockAction({id: item.id, type: 'REMOVE', qty: ''})} className="bg-red-50 text-red-600 hover:bg-red-600 hover:text-white p-2 rounded-lg transition-colors border border-red-100" title="Use/Remove Stock"><ArrowDown size={16}/></button>
-                           <button onClick={() => deleteItem(item.id, item.name)} className="bg-slate-50 text-slate-300 hover:bg-slate-200 hover:text-slate-500 p-2 rounded-lg ml-2"><Trash2 size={16}/></button>
-                         </div>
+                         <span className="text-[10px] text-slate-300 italic font-bold">View Only</span>
                        )}
                     </td>
                   </tr>

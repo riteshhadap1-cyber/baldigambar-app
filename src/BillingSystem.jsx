@@ -1,42 +1,31 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Plus, Trash2, Printer, Save, Download, Settings, 
   FileText, User, Search, Copy, Check, ChevronDown, 
-  Share2, Upload, Calendar, X 
+  Share2, Upload, Calendar, X, Lock 
 } from 'lucide-react';
+// FIREBASE IMPORTS
+import { db } from './firebase-config';
+import { ref, onValue, push, set, update, remove } from 'firebase/database';
 
-export default function BillingSystem() {
+export default function BillingSystem({ isAdmin }) { // <--- RECEIVES ADMIN PROP
   
   // ==========================================
-  // 1. THE DATABASE
+  // 1. DATABASE & STATE (CLOUD CONNECTED)
   // ==========================================
   
-  const [invoices, setInvoices] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_invoices');
-    return saved ? JSON.parse(saved) : [];
+  const [invoices, setInvoices] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [bizProfile, setBizProfile] = useState({
+    name: 'BALDIGAMBAR ENTERPRISES',
+    tagline: 'Earthmovers • Material Suppliers • Civil Contracts',
+    address: 'Mauli niwas, Ganegoan Chinchawali, Karjat',
+    mobile: '9923465353',
+    terms: 'Subject to Karjat Jurisdiction.',
+    signature: null
   });
 
-  const [clients, setClients] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_clients');
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  const [bizProfile, setBizProfile] = useState(() => {
-    const saved = localStorage.getItem('baldigambar_biz_profile');
-    return saved ? JSON.parse(saved) : {
-      name: 'BALDIGAMBAR ENTERPRISES',
-      tagline: 'Earthmovers • Material Suppliers • Civil Contracts',
-      address: 'Mauli niwas, Ganegoan Chinchawali, Karjat',
-      mobile: '9923465353',
-      gstin: '',
-      bankName: '',
-      accNo: '',
-      ifsc: '',
-      terms: 'Subject to Karjat Jurisdiction. Interest @ 24% will be charged if bill is not paid within 15 days.',
-      signature: null // Stores base64 image of signature
-    };
-  });
-
+  // Form State
   const [formData, setFormData] = useState({
     id: Date.now(),
     billNo: 101,
@@ -54,23 +43,43 @@ export default function BillingSystem() {
   });
 
   const [activeTab, setActiveTab] = useState('create'); 
-  const [showScanner, setShowScanner] = useState(false);
-  const [showStamp, setShowStamp] = useState(true); // NEW: Toggle for Stamp
+  const [showStamp, setShowStamp] = useState(true);
 
   // ==========================================
-  // 2. AUTO-SAVE & CALCULATIONS
+  // 2. LIVE CLOUD CONNECTION
   // ==========================================
-  
-  useEffect(() => { localStorage.setItem('baldigambar_invoices', JSON.stringify(invoices)); }, [invoices]);
-  useEffect(() => { localStorage.setItem('baldigambar_clients', JSON.stringify(clients)); }, [clients]);
-  useEffect(() => { localStorage.setItem('baldigambar_biz_profile', JSON.stringify(bizProfile)); }, [bizProfile]);
-
   useEffect(() => {
-    if (invoices.length > 0 && activeTab === 'create' && formData.id === undefined) {
-      const maxNo = Math.max(...invoices.map(i => Number(i.billNo) || 0));
-      setFormData(prev => ({ ...prev, billNo: maxNo + 1 }));
-    }
-  }, [invoices.length, activeTab]);
+    // 1. Listen to Invoices
+    onValue(ref(db, 'invoices'), (snapshot) => {
+      const data = snapshot.val();
+      const loaded = data ? Object.keys(data).map(key => ({ firebaseId: key, ...data[key] })) : [];
+      // Sort by Bill No descending
+      loaded.sort((a,b) => b.billNo - a.billNo);
+      setInvoices(loaded);
+      
+      // Auto-set next Bill Number if in Create Mode
+      if(activeTab === 'create' && loaded.length > 0) {
+        const maxNo = Math.max(...loaded.map(i => Number(i.billNo) || 0));
+        setFormData(prev => ({ ...prev, billNo: maxNo + 1 }));
+      }
+    });
+
+    // 2. Listen to Clients
+    onValue(ref(db, 'clients'), (snapshot) => {
+      const data = snapshot.val();
+      setClients(data ? Object.values(data) : []);
+    });
+
+    // 3. Listen to Business Profile
+    onValue(ref(db, 'biz_profile'), (snapshot) => {
+      const data = snapshot.val();
+      if(data) setBizProfile(data);
+    });
+  }, [activeTab]);
+
+  // ==========================================
+  // 3. CALCULATIONS
+  // ==========================================
 
   const subTotal = formData.items.reduce((sum, item) => sum + Number(item.amount), 0);
   const gstAmount = formData.isGst ? (subTotal * (formData.gstRate / 100)) : 0;
@@ -95,7 +104,7 @@ export default function BillingSystem() {
   };
 
   // ==========================================
-  // 3. ACTIONS
+  // 4. ACTIONS (PROTECTED)
   // ==========================================
 
   const handleItemChange = (id, field, value) => {
@@ -128,26 +137,27 @@ export default function BillingSystem() {
   };
 
   const saveInvoice = () => {
+    if (!isAdmin) return; // Lock
     if (!formData.client.name) return alert("Please enter client name");
+
+    // 1. Save Client if new
     const existingClient = clients.find(c => c.name === formData.client.name);
     if (!existingClient) {
-      setClients([...clients, { ...formData.client, id: Date.now() }]);
+      push(ref(db, 'clients'), { ...formData.client, id: Date.now() });
     }
     
-    // Check if updating existing or new
-    const existingIndex = invoices.findIndex(i => i.billNo === formData.billNo);
-    let newInvoices = [...invoices];
-    if (existingIndex >= 0) {
-       newInvoices[existingIndex] = formData;
+    // 2. Save/Update Invoice to Cloud
+    // Check if we are editing an existing firebase entry
+    if (formData.firebaseId) {
+       update(ref(db, `invoices/${formData.firebaseId}`), formData);
     } else {
-       newInvoices = [formData, ...invoices];
+       push(ref(db, 'invoices'), formData);
     }
     
-    setInvoices(newInvoices);
-    alert("Invoice Saved!");
+    alert("Invoice Saved to Cloud!");
     
-    // Reset
-    const maxNo = Math.max(...newInvoices.map(i => Number(i.billNo) || 0));
+    // Reset Form
+    const maxNo = Math.max(...invoices.map(i => Number(i.billNo) || 0));
     setFormData({
       id: Date.now(),
       billNo: maxNo + 1,
@@ -160,15 +170,21 @@ export default function BillingSystem() {
     });
   };
 
+  const saveSettings = () => {
+    if (!isAdmin) return;
+    set(ref(db, 'biz_profile'), bizProfile);
+    alert("Settings Saved to Cloud!");
+  };
+
   const selectClient = (clientName) => {
     const client = clients.find(c => c.name === clientName);
     if (client) {
       setFormData(prev => ({ ...prev, client: { ...client } }));
-      setShowScanner(false);
     }
   };
 
   const handleSignatureUpload = (e) => {
+    if (!isAdmin) return;
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
@@ -186,12 +202,11 @@ export default function BillingSystem() {
   };
 
   // ==========================================
-  // 4. UI RENDER
+  // 5. UI RENDER
   // ==========================================
   return (
     <div className="space-y-6 pb-20 font-sans text-slate-800 animate-fade-in">
       
-      {/* --- PRINT STYLES & HIDE ARROWS --- */}
       <style>{`
         input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
@@ -209,15 +224,15 @@ export default function BillingSystem() {
         <div className="flex gap-2 bg-white p-1 rounded-xl border border-gray-200 shadow-sm">
           <button onClick={() => setActiveTab('create')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'create' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Create Bill</button>
           <button onClick={() => setActiveTab('history')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'history' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>History</button>
-          <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'settings' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}><Settings size={16}/></button>
+          {isAdmin && <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'settings' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}><Settings size={16}/></button>}
         </div>
         <button onClick={() => window.print()} className="flex items-center gap-2 bg-slate-800 text-white px-6 py-2 rounded-xl font-bold shadow-lg hover:bg-black">
           <Printer size={18}/> Print Invoice
         </button>
       </div>
 
-      {/* --- TAB: SETTINGS --- */}
-      {activeTab === 'settings' && (
+      {/* --- TAB: SETTINGS (ADMIN ONLY) --- */}
+      {activeTab === 'settings' && isAdmin && (
         <div className="bg-white p-8 rounded-2xl shadow-lg border border-gray-100 max-w-3xl mx-auto animate-fade-in">
           <h3 className="text-xl font-black uppercase text-gray-800 mb-6 border-b pb-2">Business Profile</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
@@ -235,15 +250,13 @@ export default function BillingSystem() {
             <div><label className="text-xs font-bold text-gray-400 uppercase">IFSC Code</label><input className="w-full border-2 border-gray-100 p-3 rounded-lg font-bold focus:border-orange-500 outline-none" value={bizProfile.ifsc} onChange={e => setBizProfile({...bizProfile, ifsc: e.target.value})} /></div>
           </div>
 
-          {/* Signature Upload */}
           <div className="mb-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
              <label className="text-xs font-bold text-gray-400 uppercase flex items-center gap-2 mb-2"><Upload size={14}/> Upload Signature (Image)</label>
              <input type="file" accept="image/*" onChange={handleSignatureUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100"/>
              {bizProfile.signature && <img src={bizProfile.signature} alt="Sig" className="h-16 mt-2 border border-slate-300 bg-white p-1 rounded" />}
           </div>
           
-          <div className="mt-4"><label className="text-xs font-bold text-gray-400 uppercase">Terms & Conditions</label><textarea className="w-full border-2 border-gray-100 p-3 rounded-lg font-bold text-sm h-24 focus:border-orange-500 outline-none" value={bizProfile.terms} onChange={e => setBizProfile({...bizProfile, terms: e.target.value})} /></div>
-          <button onClick={() => setActiveTab('create')} className="mt-6 bg-slate-900 text-white px-8 py-3 rounded-xl font-bold shadow-lg hover:bg-black">Save Settings</button>
+          <button onClick={saveSettings} className="mt-6 bg-slate-900 text-white px-8 py-3 rounded-xl font-bold shadow-lg hover:bg-black w-full">Save Settings to Cloud</button>
         </div>
       )}
 
@@ -264,90 +277,87 @@ export default function BillingSystem() {
                     <td className="p-4 font-bold text-gray-800">{inv.client.name}</td>
                     <td className="p-4 text-right font-black text-emerald-600">₹{total.toLocaleString()}</td>
                     <td className="p-4 text-center flex justify-center gap-3">
-                      <button onClick={() => {setFormData(inv); setActiveTab('create');}} className="text-orange-600 font-bold hover:underline flex items-center gap-1"><FileText size={16}/> View</button>
+                      <button onClick={() => {setFormData(inv); setActiveTab('create');}} className="text-orange-600 font-bold hover:underline flex items-center gap-1"><FileText size={16}/> View/Edit</button>
                       <button onClick={() => shareOnWhatsApp(inv)} className="text-green-600 font-bold hover:underline flex items-center gap-1"><Share2 size={16}/> WhatsApp</button>
+                      {isAdmin && <button onClick={() => { if(confirm('Delete?')) remove(ref(db, `invoices/${inv.firebaseId}`)); }} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>}
                     </td>
                   </tr>
                 )
               })}
-              {invoices.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-gray-400 italic">No invoices generated yet.</td></tr>}
+              {invoices.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-gray-400 italic">No invoices found on cloud.</td></tr>}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* --- TAB: CREATE INVOICE (MAIN UI) --- */}
+      {/* --- TAB: CREATE INVOICE --- */}
       {activeTab === 'create' && (
         <div className="flex flex-col lg:flex-row gap-6">
           
-          {/* LEFT: CONTROLS */}
+          {/* LEFT: CONTROLS (HIDDEN FOR FAMILY IF YOU WANT, OR READ ONLY) */}
           <div className="lg:w-1/3 space-y-4 no-print animate-fade-in">
-            <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-              <div className="grid grid-cols-2 gap-4 mb-4">
-                <div><label className="text-xs font-bold text-gray-400 uppercase">Bill Type</label><select className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}><option>TAX INVOICE</option><option>QUOTATION</option><option>DELIVERY CHALLAN</option></select></div>
-                <div><label className="text-xs font-bold text-gray-400 uppercase">Date</label><input type="date" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} /></div>
-              </div>
-              <div className="mb-4 relative">
-                <label className="text-xs font-bold text-gray-400 uppercase">Client Name</label>
-                <div className="flex gap-2">
-                  <input type="text" list="clientList" placeholder="Search Client..." className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.name} onChange={e => { setFormData({...formData, client: { ...formData.client, name: e.target.value }}); }} />
-                  <datalist id="clientList">{clients.map(c => <option key={c.id} value={c.name} />)}</datalist>
-                  <button onClick={() => selectClient(formData.client.name)} className="bg-orange-100 text-orange-600 p-2.5 rounded-lg hover:bg-orange-200"><Search size={20}/></button>
+            {isAdmin ? (
+              <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+                <h4 className="font-bold text-slate-700 uppercase mb-4 flex items-center gap-2"><Settings size={16}/> Invoice Details</h4>
+                <div className="grid grid-cols-2 gap-4 mb-4">
+                  <div><label className="text-xs font-bold text-gray-400 uppercase">Bill Type</label><select className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}><option>TAX INVOICE</option><option>QUOTATION</option><option>DELIVERY CHALLAN</option></select></div>
+                  <div><label className="text-xs font-bold text-gray-400 uppercase">Date</label><input type="date" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} /></div>
+                </div>
+                <div className="mb-4 relative">
+                  <label className="text-xs font-bold text-gray-400 uppercase">Client Name</label>
+                  <div className="flex gap-2">
+                    <input type="text" list="clientList" placeholder="Search Client..." className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.name} onChange={e => { setFormData({...formData, client: { ...formData.client, name: e.target.value }}); }} />
+                    <datalist id="clientList">{clients.map(c => <option key={c.id} value={c.name} />)}</datalist>
+                    <button onClick={() => selectClient(formData.client.name)} className="bg-orange-100 text-orange-600 p-2.5 rounded-lg hover:bg-orange-200"><Search size={20}/></button>
+                  </div>
+                </div>
+                <div className="mb-4"><label className="text-xs font-bold text-gray-400 uppercase">Address</label><textarea rows="2" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold text-sm focus:border-orange-500 outline-none" value={formData.client.address} onChange={e => setFormData({...formData, client: { ...formData.client, address: e.target.value }})} /></div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div><label className="text-xs font-bold text-gray-400 uppercase">Mobile</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.mobile} onChange={e => setFormData({...formData, client: { ...formData.client, mobile: e.target.value }})} /></div>
+                  <div><label className="text-xs font-bold text-gray-400 uppercase">GSTIN</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.gstin} onChange={e => setFormData({...formData, client: { ...formData.client, gstin: e.target.value }})} /></div>
+                </div>
+
+                {/* CALCULATIONS BOX */}
+                <div className="mt-6 pt-4 border-t border-slate-100">
+                  <div className="flex items-center justify-between mb-4">
+                    <h4 className="font-bold text-gray-700 uppercase text-sm">Calculations</h4>
+                    <div className="flex gap-2">
+                      <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 hover:bg-slate-100">
+                        <input type="checkbox" checked={showStamp} onChange={e => setShowStamp(e.target.checked)} className="accent-orange-600 w-4 h-4"/>
+                        <span className="text-xs font-bold text-slate-600 uppercase">Stamp</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 hover:bg-slate-100">
+                        <input type="checkbox" checked={formData.isGst} onChange={e => setFormData({...formData, isGst: e.target.checked})} className="accent-orange-600 w-4 h-4"/>
+                        <span className="text-xs font-bold text-slate-600 uppercase">GST 18%</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 bg-yellow-50 p-4 rounded-xl border border-yellow-100">
+                    <label className="text-xs font-bold text-yellow-700 uppercase">Discount / Offer</label>
+                    <div className="grid grid-cols-2 gap-3 mt-1">
+                      <input type="text" placeholder="Reason" className="bg-white border border-yellow-200 p-2 rounded-lg font-bold text-xs" value={formData.discountReason} onChange={e => setFormData({...formData, discountReason: e.target.value})} />
+                      <input type="number" placeholder="Amt" className="bg-white border border-yellow-200 p-2 rounded-lg font-bold text-yellow-800" value={formData.discount} onChange={e => setFormData({...formData, discount: Number(e.target.value)})} />
+                    </div>
+                  </div>
+                  
+                  <div className="mt-4 bg-green-50 p-4 rounded-xl border border-green-100">
+                    <label className="text-xs font-bold text-green-700 uppercase">Less: Advance / Paid</label>
+                    <input type="number" className="w-full bg-white border border-green-200 p-2.5 rounded-lg font-bold mt-2 text-green-800 focus:outline-none" value={formData.advances} onChange={e => setFormData({...formData, advances: Number(e.target.value)})} />
+                  </div>
+
+                  <button onClick={saveInvoice} className="w-full bg-slate-900 text-white py-3.5 rounded-xl font-bold mt-6 flex items-center justify-center gap-2 hover:bg-black shadow-lg shadow-slate-900/20 transition-all">
+                    <Save size={18}/> Save to Cloud
+                  </button>
                 </div>
               </div>
-              <div className="mb-4"><label className="text-xs font-bold text-gray-400 uppercase">Address</label><textarea rows="2" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold text-sm focus:border-orange-500 outline-none" value={formData.client.address} onChange={e => setFormData({...formData, client: { ...formData.client, address: e.target.value }})} /></div>
-              <div className="grid grid-cols-2 gap-4">
-                <div><label className="text-xs font-bold text-gray-400 uppercase">Mobile</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.mobile} onChange={e => setFormData({...formData, client: { ...formData.client, mobile: e.target.value }})} /></div>
-                <div><label className="text-xs font-bold text-gray-400 uppercase">GSTIN</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.gstin} onChange={e => setFormData({...formData, client: { ...formData.client, gstin: e.target.value }})} /></div>
+            ) : (
+              <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm text-center">
+                <Lock className="mx-auto text-slate-300 mb-2" size={40} />
+                <p className="font-bold text-slate-500">Editing Locked</p>
+                <p className="text-xs text-slate-400">Login as Admin to create bills.</p>
               </div>
-            </div>
-
-            <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
-                <h4 className="font-bold text-gray-700 uppercase text-sm">Calculations</h4>
-                <div className="flex gap-2">
-                  {/* STAMP TOGGLE */}
-                  <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 hover:bg-slate-100 transition-colors">
-                    <input type="checkbox" checked={showStamp} onChange={e => setShowStamp(e.target.checked)} className="accent-orange-600 w-4 h-4"/>
-                    <span className="text-xs font-bold text-slate-600 uppercase">Stamp</span>
-                  </label>
-                  {/* GST TOGGLE */}
-                  <label className="flex items-center gap-2 cursor-pointer bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-100 hover:bg-slate-100 transition-colors">
-                    <input type="checkbox" checked={formData.isGst} onChange={e => setFormData({...formData, isGst: e.target.checked})} className="accent-orange-600 w-4 h-4"/>
-                    <span className="text-xs font-bold text-slate-600 uppercase">GST 18%</span>
-                  </label>
-                </div>
-              </div>
-              <div className="space-y-2 text-sm border-t border-gray-100 pt-4">
-                <div className="flex justify-between"><span className="text-gray-500">Sub Total</span><span className="font-bold text-gray-800">₹{subTotal.toLocaleString()}</span></div>
-                {formData.isGst && (
-                  <>
-                    <div className="flex justify-between text-gray-400 text-xs"><span>CGST (9%)</span><span>₹{(gstAmount/2).toLocaleString()}</span></div>
-                    <div className="flex justify-between text-gray-400 text-xs"><span>SGST (9%)</span><span>₹{(gstAmount/2).toLocaleString()}</span></div>
-                  </>
-                )}
-                <div className="flex justify-between text-lg font-bold text-gray-700"><span>Total</span><span>₹{Math.round(totalBeforeDiscount).toLocaleString()}</span></div>
-              </div>
-
-              {/* DISCOUNT Section */}
-              <div className="mt-4 bg-yellow-50 p-4 rounded-xl border border-yellow-100">
-                <label className="text-xs font-bold text-yellow-700 uppercase">Discount / Offer</label>
-                <div className="grid grid-cols-2 gap-3 mt-1">
-                  <input type="text" placeholder="Reason (e.g. Festival)" className="bg-white border border-yellow-200 p-2 rounded-lg font-bold text-xs" value={formData.discountReason} onChange={e => setFormData({...formData, discountReason: e.target.value})} />
-                  <input type="number" placeholder="Amount" className="bg-white border border-yellow-200 p-2 rounded-lg font-bold text-yellow-800" value={formData.discount} onChange={e => setFormData({...formData, discount: Number(e.target.value)})} />
-                </div>
-              </div>
-              
-              <div className="mt-4 bg-green-50 p-4 rounded-xl border border-green-100">
-                <label className="text-xs font-bold text-green-700 uppercase">Less: Advance / Paid</label>
-                <input type="number" className="w-full bg-white border border-green-200 p-2.5 rounded-lg font-bold mt-2 text-green-800 focus:outline-none" value={formData.advances} onChange={e => setFormData({...formData, advances: Number(e.target.value)})} />
-                <div className="flex justify-between text-sm font-bold mt-3 text-gray-700"><span>Balance Due:</span><span className="text-red-600">₹{balanceDue.toLocaleString()}</span></div>
-              </div>
-
-              <button onClick={saveInvoice} className="w-full bg-slate-900 text-white py-3.5 rounded-xl font-bold mt-6 flex items-center justify-center gap-2 hover:bg-black shadow-lg shadow-slate-900/20 transition-all">
-                <Save size={18}/> Save to History
-              </button>
-            </div>
+            )}
           </div>
 
           {/* RIGHT: INVOICE PREVIEW (Pure White for Print) */}
@@ -356,7 +366,7 @@ export default function BillingSystem() {
             {/* PAPER */}
             <div className="bg-white w-[210mm] min-h-[297mm] p-[10mm] shadow-xl print:shadow-none print:m-0 relative flex flex-col print-area">
               
-              {/* STAMP (Controlled by Toggle) */}
+              {/* STAMP */}
               {showStamp && (
                 balanceDue <= 0 ? (
                   <div className="absolute top-[40%] left-[40%] border-4 border-green-600 text-green-600 text-6xl font-black opacity-20 transform -rotate-45 p-4 rounded-xl pointer-events-none">PAID</div>
@@ -368,7 +378,7 @@ export default function BillingSystem() {
               {/* HEADER */}
               <div className="flex justify-between items-start border-b-2 border-slate-900 pb-4 mb-4">
                 <div className="w-2/3">
-                  <h1 className="text-3xl font-black text-slate-900 uppercase tracking-tight">{bizProfile.name || 'YOUR COMPANY NAME'}</h1>
+                  <h1 className="text-3xl font-black text-slate-900 uppercase tracking-tight">{bizProfile.name}</h1>
                   <p className="text-xs font-bold text-slate-500 tracking-widest uppercase mt-1">{bizProfile.tagline}</p>
                   <div className="mt-3 text-sm text-slate-600 leading-tight font-medium">
                     <p>{bizProfile.address}</p>
@@ -418,24 +428,26 @@ export default function BillingSystem() {
                       <tr key={item.id} className="border-b border-slate-200 print:border-slate-300">
                         <td className="p-2 text-center border-r border-slate-300 align-top font-medium">{index + 1}</td>
                         <td className="p-2 border-r border-slate-300 align-top">
-                          <input className="w-full bg-transparent outline-none font-bold text-slate-800" placeholder="Item Name / Vehicle No" value={item.desc} onChange={e => handleItemChange(item.id, 'desc', e.target.value)} />
+                          <input disabled={!isAdmin} className="w-full bg-transparent outline-none font-bold text-slate-800" placeholder="Item Name" value={item.desc} onChange={e => handleItemChange(item.id, 'desc', e.target.value)} />
                         </td>
                         <td className="p-2 text-center border-r border-slate-300 align-top">
-                          <input className="w-full bg-transparent outline-none text-center font-medium" placeholder="-" value={item.hsn} onChange={e => handleItemChange(item.id, 'hsn', e.target.value)} />
+                          <input disabled={!isAdmin} className="w-full bg-transparent outline-none text-center font-medium" placeholder="-" value={item.hsn} onChange={e => handleItemChange(item.id, 'hsn', e.target.value)} />
                         </td>
                         <td className="p-2 text-center border-r border-slate-300 align-top">
-                          <input type="number" className="w-full bg-transparent outline-none text-center font-bold text-slate-800" value={item.qty} onChange={e => handleItemChange(item.id, 'qty', e.target.value)} />
+                          <input disabled={!isAdmin} type="number" className="w-full bg-transparent outline-none text-center font-bold text-slate-800" value={item.qty} onChange={e => handleItemChange(item.id, 'qty', e.target.value)} />
                         </td>
                         <td className="p-2 text-right border-r border-slate-300 align-top">
-                          <input type="number" className="w-full bg-transparent outline-none text-right font-bold text-slate-800" value={item.rate} onChange={e => handleItemChange(item.id, 'rate', e.target.value)} />
+                          <input disabled={!isAdmin} type="number" className="w-full bg-transparent outline-none text-right font-bold text-slate-800" value={item.rate} onChange={e => handleItemChange(item.id, 'rate', e.target.value)} />
                         </td>
                         <td className="p-2 text-right font-black align-top text-slate-900">₹{Number(item.amount).toLocaleString()}</td>
-                        <td className="p-2 text-center no-print border-none"><button onClick={() => removeItem(item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14}/></button></td>
+                        <td className="p-2 text-center no-print border-none">
+                            {isAdmin && <button onClick={() => removeItem(item.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={14}/></button>}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
-                <button onClick={addItem} className="no-print mt-3 text-xs font-bold text-white bg-slate-800 px-3 py-1 rounded-full hover:bg-black flex items-center gap-1 w-fit"><Plus size={10}/> Add Item</button>
+                {isAdmin && <button onClick={addItem} className="no-print mt-3 text-xs font-bold text-white bg-slate-800 px-3 py-1 rounded-full hover:bg-black flex items-center gap-1 w-fit"><Plus size={10}/> Add Item</button>}
               </div>
 
               {/* TOTALS & FOOTER */}
@@ -470,10 +482,9 @@ export default function BillingSystem() {
                         </>
                       )}
                       
-                      {/* DISCOUNT LINE */}
                       {formData.discount > 0 && (
                         <div className="flex justify-between text-yellow-700 font-bold border-t border-dashed pt-1">
-                          <span>Discount {formData.discountReason ? `(${formData.discountReason})` : ''}</span>
+                          <span>Discount</span>
                           <span>- ₹{formData.discount}</span>
                         </div>
                       )}
@@ -485,7 +496,6 @@ export default function BillingSystem() {
 
                     <div className="mt-12 text-center">
                       <p className="text-[10px] font-bold uppercase mb-4 text-slate-600">For, {bizProfile.name}</p>
-                      {/* DIGITAL SIGNATURE */}
                       {bizProfile.signature ? (
                          <img src={bizProfile.signature} alt="Sig" className="h-12 mx-auto mb-1" />
                       ) : (
