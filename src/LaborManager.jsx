@@ -28,15 +28,12 @@ export default function LaborManager({ isAdmin }) {
   const [viewMonth, setViewMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
   
   const [newWorker, setNewWorker] = useState({ name: '', role: '', rate: '', phone: '' });
-  
-  // MONEY FORM
   const [moneyForm, setMoneyForm] = useState({ 
     amount: '', 
     reason: '', 
     type: 'ADVANCE',
     date: new Date().toISOString().split('T')[0]
   }); 
-  
   const [inkSaver, setInkSaver] = useState(true);
 
   // ==========================================
@@ -66,6 +63,14 @@ export default function LaborManager({ isAdmin }) {
   // ==========================================
   // 3. LOGIC & CALCULATIONS
   // ==========================================
+
+  const changeMonth = (offset) => {
+    const [y, m] = viewMonth.split('-').map(Number);
+    const date = new Date(y, m - 1 + offset);
+    const newY = date.getFullYear();
+    const newM = String(date.getMonth() + 1).padStart(2, '0');
+    setViewMonth(`${newY}-${newM}`);
+  };
 
   const markAttendance = (workerId, status) => {
     if (!isAdmin) return;
@@ -207,14 +212,14 @@ export default function LaborManager({ isAdmin }) {
     
     const payable = earned + totalBonus - totalAdvance;
 
-    // Grid Generation (Enhanced with Day Names)
+    // Grid Generation
     const daysInMonth = new Date(viewMonth.split('-')[0], viewMonth.split('-')[1], 0).getDate();
     const monthLog = [];
     
     for(let i=1; i<=daysInMonth; i++) {
         const dayStr = `${viewMonth}-${String(i).padStart(2, '0')}`;
         const dateObj = new Date(dayStr);
-        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' }); // Mon, Tue
+        const dayName = dateObj.toLocaleDateString('en-US', { weekday: 'short' }); 
         const isSunday = dateObj.getDay() === 0;
         
         const status = (attendance[dayStr] || {})[id] || '-';
@@ -224,7 +229,6 @@ export default function LaborManager({ isAdmin }) {
     return { present, half, absent, earned, totalAdvance, totalBonus, payable, monthLog, monthlyAdvances, monthlyBonuses };
   };
 
-  // Daily Cost Calc
   const dailyCost = workers.reduce((sum, w) => {
     const status = (attendance[selectedDate] || {})[w.id];
     if (status === 'P') return sum + Number(w.rate);
@@ -252,26 +256,17 @@ export default function LaborManager({ isAdmin }) {
           main { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; }
           body { background: white !important; -webkit-print-color-adjust: exact; }
           .print-area { display: block !important; padding: 0 !important; width: 100%; }
-          
-          /* INK SAVER MODE */
-          .print-ink-saver * {
-            color: black !important;
-            background: transparent !important;
-            border-color: black !important;
-            box-shadow: none !important;
-          }
+          .print-ink-saver * { color: black !important; background: transparent !important; border-color: black !important; box-shadow: none !important; }
           .print-ink-saver .bg-black { background: white !important; border: 1px solid black !important; color: black !important; }
           .print-ink-saver .text-white { color: black !important; }
           .print-ink-saver .bg-slate-900 { background: white !important; border: 2px solid black !important; }
-          
-          /* TABLE GRID */
           .muster-grid { display: grid; grid-template-columns: repeat(16, 1fr); border: 2px solid black; }
           .muster-cell { border: 1px solid black; padding: 2px; text-align: center; font-size: 10px; }
-          .sunday-cell { background-color: #f3f4f6 !important; -webkit-print-color-adjust: exact; } /* Grey out Sundays */
+          .sunday-cell { background-color: #f3f4f6 !important; -webkit-print-color-adjust: exact; } 
         }
       `}</style>
 
-      {/* DASHBOARD HEADER (Stats) */}
+      {/* DASHBOARD HEADER */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 no-print">
         <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-sm flex items-center gap-3">
             <div className="bg-orange-100 p-2 rounded-lg text-orange-600"><Users size={20}/></div>
@@ -312,9 +307,23 @@ export default function LaborManager({ isAdmin }) {
             </div>
           )}
           {activeTab === 'payroll' && (
-            <div className="flex items-center gap-2 bg-white p-2 rounded-xl border border-gray-200 shadow-sm">
-                <CalendarDays size={18} className="text-slate-900"/>
-                <input type="month" value={viewMonth} onChange={(e) => setViewMonth(e.target.value)} className="font-bold text-slate-800 outline-none text-sm bg-transparent"/>
+            <div className="flex items-center bg-white rounded-xl p-1 border border-gray-200 shadow-sm">
+                <button onClick={() => changeMonth(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
+                    <ChevronLeft size={20} />
+                </button>
+                
+                <div className="relative px-4 py-1 text-center min-w-[140px] group">
+                    <div className="flex flex-col items-center cursor-pointer">
+                        <span className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Payroll Month</span>
+                        <span className="text-sm font-bold text-slate-700 uppercase tracking-wider group-hover:text-orange-600 transition-colors">{formatMonth(viewMonth)}</span>
+                    </div>
+                    {/* Hidden input overlay */}
+                    <input type="month" value={viewMonth} onChange={(e) => setViewMonth(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"/>
+                </div>
+
+                <button onClick={() => changeMonth(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
+                    <ChevronRight size={20} />
+                </button>
             </div>
           )}
         </div>
@@ -368,7 +377,7 @@ export default function LaborManager({ isAdmin }) {
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden lg:col-span-1 h-fit">
             <div className="p-4 border-b border-gray-200 font-bold text-slate-700 bg-slate-50 flex justify-between">
                 <span>Select Worker</span>
-                <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded uppercase font-bold">{viewMonth}</span>
+                <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded uppercase font-bold">{formatMonth(viewMonth)}</span>
             </div>
             <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
               {workers.map(w => {
@@ -534,7 +543,7 @@ export default function LaborManager({ isAdmin }) {
         </div>
       )}
 
-      {/* --- RE-ENGINEERED PRINT SLIP (INK SAVER + GRID) --- */}
+      {/* --- PRINT SLIP --- */}
       <div className="hidden print:block p-8 bg-white text-black print-area">
         {selectedWorker && (
           <div className="border-2 border-black p-8 max-w-3xl mx-auto mt-4 text-center">
@@ -561,7 +570,7 @@ export default function LaborManager({ isAdmin }) {
                 </div>
             </div>
 
-            {/* NEW: ENHANCED MUSTER GRID */}
+            {/* MUSTER GRID */}
             <div className="mt-8 text-left">
                 <p className="text-[10px] font-bold uppercase mb-2">Attendance Register (Muster Roll)</p>
                 {/* 1st to 16th */}

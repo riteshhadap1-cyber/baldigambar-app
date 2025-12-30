@@ -3,7 +3,8 @@ import {
   Plus, Trash2, Fuel, Check, Clock, Printer, X, Settings, 
   User, Wrench, TrendingUp, AlertTriangle, Search, Droplet, 
   Calendar, DollarSign, FileText, ChevronDown, ChevronUp, History,
-  Download, PieChart, Activity, CalendarDays, Lock
+  Download, PieChart, Activity, CalendarDays, Lock,
+  ChevronLeft, ChevronRight
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
@@ -60,14 +61,10 @@ export default function FleetManager({ isAdmin }) {
         const normalized = {};
         Object.keys(data).forEach(vehicle => {
            const vData = data[vehicle];
-           // Convert Advance Object to Array
            const advObj = vData.advanceHistory || {};
            const advArray = Object.keys(advObj).map(k => ({ id: k, ...advObj[k] }));
-           
-           // Convert Fuel Object to Array (New Feature)
            const fuelObj = vData.fuelHistory || {};
            const fuelArray = Object.keys(fuelObj).map(k => ({ id: k, ...fuelObj[k] }));
-           
            normalized[vehicle] = { ...vData, advanceHistory: advArray, fuelHistory: fuelArray };
         });
         setFleetData(normalized);
@@ -85,8 +82,23 @@ export default function FleetManager({ isAdmin }) {
   }, []);
 
   // ==========================================
-  // 3. LOGIC & CALCULATIONS (MONTHLY FILTERED)
+  // 3. LOGIC & CALCULATIONS
   // ==========================================
+
+  const changeMonth = (offset) => {
+    const [y, m] = viewMonth.split('-').map(Number);
+    const date = new Date(y, m - 1 + offset);
+    const newY = date.getFullYear();
+    const newM = String(date.getMonth() + 1).padStart(2, '0');
+    setViewMonth(`${newY}-${newM}`);
+  };
+
+  const formatMonth = (ym) => {
+    if(!ym) return "";
+    const [y, m] = ym.split('-');
+    const date = new Date(y, m - 1);
+    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
+  };
 
   // Filter Logbook by Month & Search
   const filteredEntries = useMemo(() => {
@@ -99,26 +111,20 @@ export default function FleetManager({ isAdmin }) {
     }).sort((a, b) => new Date(b.date) - new Date(a.date));
   }, [entries, activeTab, viewMonth, searchQuery]);
 
-  // Financials (Monthly)
+  // Financials
   const totalIncome = filteredEntries.reduce((sum, item) => sum + Number(item.amount), 0);
   const totalPending = filteredEntries.filter(e => !e.isPaid).reduce((sum, item) => sum + Number(item.amount), 0);
   const totalHoursWorked = filteredEntries.reduce((sum, item) => sum + Number(item.hours), 0);
 
-  // Get Vehicle Specific Monthly Data
   const getVehicleMonthlyStats = (vehicle) => {
       const data = fleetData[vehicle] || {};
-      
-      // Filter Advances by Month
       const monthlyAdvances = (data.advanceHistory || []).filter(a => a.date.startsWith(viewMonth));
       const totalAdvance = monthlyAdvances.reduce((sum, a) => sum + Number(a.amount), 0);
-      
-      // Filter Fuel by Month
       const monthlyFuel = (data.fuelHistory || []).filter(f => f.date.startsWith(viewMonth));
       const totalFuelCost = monthlyFuel.reduce((sum, f) => sum + Number(f.cost), 0);
       const totalFuelLitres = monthlyFuel.reduce((sum, f) => sum + Number(f.litres), 0);
-
       const salary = Number(data.salary || 0);
-      const maintenance = Number(data.service || 0); // Manual monthly entry for maintenance
+      const maintenance = Number(data.service || 0);
 
       return { totalAdvance, totalFuelCost, totalFuelLitres, salary, maintenance, monthlyAdvances, monthlyFuel };
   };
@@ -134,7 +140,6 @@ export default function FleetManager({ isAdmin }) {
 
   const netProfit = totalIncome - totalExpense;
 
-  // Site-wise Breakdown
   const siteStats = useMemo(() => {
     const stats = {};
     filteredEntries.forEach(e => {
@@ -144,9 +149,7 @@ export default function FleetManager({ isAdmin }) {
     return Object.entries(stats).sort((a,b) => b[1] - a[1]); 
   }, [filteredEntries]);
 
-  // Service Status (Lifetime Calculation, not Monthly)
   const getServiceStatus = (vehicle) => {
-    // Total lifetime hours for this machine
     const lifetimeHours = entries.filter(e => e.machine === vehicle).reduce((sum, e) => sum + Number(e.hours || 0), 0);
     const lastServiceAt = fleetData[vehicle]?.lastServiceHours || 0;
     const hoursRun = lifetimeHours - lastServiceAt;
@@ -163,22 +166,17 @@ export default function FleetManager({ isAdmin }) {
     update(ref(db, `fleet_data/${vehicle}`), { [field]: value });
   };
 
-  // Generic Adder for Fuel/Advance
   const addHistoryEntry = (e, type) => {
     e.preventDefault();
     if (!isAdmin) return;
     const fd = new FormData(e.target);
-    
-    const entry = {
-        date: fd.get('date'),
-        amount: Number(fd.get('amount')) // Shared field name for logic simplicity
-    };
+    const entry = { date: fd.get('date'), amount: Number(fd.get('amount')) };
 
     if (type === 'advance') {
         entry.reason = fd.get('reason');
         push(ref(db, `fleet_data/${advanceModalVehicle}/advanceHistory`), entry);
     } else if (type === 'fuel') {
-        entry.cost = Number(fd.get('amount')); // Remap for fuel
+        entry.cost = Number(fd.get('amount')); 
         entry.litres = Number(fd.get('litres'));
         delete entry.amount;
         push(ref(db, `fleet_data/${advanceModalVehicle}/fuelHistory`), entry);
@@ -235,14 +233,6 @@ export default function FleetManager({ isAdmin }) {
     } 
   };
 
-  const formatMonth = (ym) => {
-    if(!ym) return "";
-    const [y, m] = ym.split('-');
-    const date = new Date(y, m - 1);
-    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
-  };
-
-  // CSV Export
   const downloadCSV = () => {
     const headers = ["Date", "Machine", "Client", "Time", "Work(Hrs)", "Amount", "Status"];
     const rows = filteredEntries.map(e => [e.date, e.machine, e.client, e.time, e.hours, e.amount, e.isPaid ? "Paid" : "Pending"]);
@@ -366,10 +356,26 @@ export default function FleetManager({ isAdmin }) {
             <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
             <input type="text" placeholder="Search..." className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold outline-none" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
           </div>
-          <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl p-1 pr-2 shadow-sm">
-             <CalendarDays size={18} className="ml-2 text-slate-400"/>
-             <input type="month" value={viewMonth} onChange={e => setViewMonth(e.target.value)} className="font-bold text-slate-700 outline-none text-sm bg-transparent py-1" />
+          
+          <div className="flex items-center bg-white rounded-xl p-1 border border-gray-200 shadow-sm">
+                <button onClick={() => changeMonth(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
+                    <ChevronLeft size={20} />
+                </button>
+                
+                <div className="relative px-2 py-1 text-center min-w-[120px] group">
+                    <div className="flex flex-col items-center cursor-pointer">
+                        <span className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Report Month</span>
+                        <span className="text-sm font-bold text-slate-700 uppercase tracking-wider group-hover:text-orange-600 transition-colors">{formatMonth(viewMonth)}</span>
+                    </div>
+                    {/* Hidden input overlay */}
+                    <input type="month" value={viewMonth} onChange={(e) => setViewMonth(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"/>
+                </div>
+
+                <button onClick={() => changeMonth(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
+                    <ChevronRight size={20} />
+                </button>
           </div>
+
           <button onClick={() => setInkSaver(!inkSaver)} className={`p-2 rounded-xl transition-all border ${inkSaver ? 'bg-green-50 text-green-600 border-green-200' : 'bg-white text-slate-400 border-slate-200'}`} title="Ink Saver"><Droplet size={18}/></button>
           <button onClick={() => window.print()} className="bg-slate-800 text-white p-2 rounded-xl hover:bg-black"><Printer size={18}/></button>
         </div>
