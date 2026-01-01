@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sparkles, Send, Bot, User, TrendingUp, AlertTriangle, 
-  CheckCircle, Loader, DollarSign, BrainCircuit 
+  CheckCircle, Loader, DollarSign, BrainCircuit, Info 
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
@@ -12,164 +12,196 @@ export default function AIAssistant() {
   // ==========================================
   // 1. LIVE DATA FEED (The "Brain" Context)
   // ==========================================
-  const [businessData, setBusinessData] = useState({
-    pendingDues: 0,
-    cashBalance: 0,
-    activeWorkers: 0,
-    fleetStatus: 'Unknown',
-    highExpenseVehicle: 'None'
+  const [contextData, setContextData] = useState({
+    invoices: [],
+    expenses: [],
+    workers: [],
+    fleet: {}
   });
-
-  const [loadingData, setLoadingData] = useState(true);
-
-  useEffect(() => {
-    // We listen to all main nodes to build a "Mental Model" for the AI
-    const refs = {
-      invoices: ref(db, 'invoices'),
-      cashbook: ref(db, 'cashbook'),
-      workers: ref(db, 'attendance'),
-      fleet: ref(db, 'fleet_data')
-    };
-
-    const unsubInvoices = onValue(refs.invoices, (snap) => {
-      const data = snap.val() ? Object.values(snap.val()) : [];
-      // Calculate Pending Dues
-      const pending = data.reduce((sum, inv) => {
-        const total = (inv.items||[]).reduce((s,i)=>s+Number(i.amount),0);
-        const paid = Number(inv.advances || 0);
-        const due = total - paid;
-        return sum + (due > 0 ? due : 0);
-      }, 0);
-      
-      setBusinessData(prev => ({ ...prev, pendingDues: pending }));
-    });
-
-    const unsubCashbook = onValue(refs.cashbook, (snap) => {
-      const data = snap.val() ? Object.values(snap.val()) : [];
-      const income = data.filter(e => e.type === 'Income').reduce((s,e)=>s+Number(e.amount),0);
-      const expense = data.filter(e => e.type === 'Expense').reduce((s,e)=>s+Number(e.amount),0);
-      setBusinessData(prev => ({ ...prev, cashBalance: income - expense }));
-    });
-
-    const unsubFleet = onValue(refs.fleet, (snap) => {
-      const data = snap.val() || {};
-      // Find vehicle with highest fuel cost
-      let maxCost = 0;
-      let maxVehicle = 'None';
-      Object.entries(data).forEach(([name, details]) => {
-        const cost = Number(details.fuelCost || 0);
-        if(cost > maxCost) {
-          maxCost = cost;
-          maxVehicle = name;
-        }
-      });
-      setBusinessData(prev => ({ ...prev, highExpenseVehicle: maxVehicle }));
-    });
-
-    // Simulating "Data Ready" state
-    setTimeout(() => setLoadingData(false), 1500);
-
-    return () => { unsubInvoices(); unsubCashbook(); unsubFleet(); };
-  }, []);
-
-  // ==========================================
-  // 2. CHAT LOGIC
-  // ==========================================
+  
   const [messages, setMessages] = useState([
-    { role: 'ai', text: "Hello Ritesh! I am connected to your live Baldigambar Cloud Database. Ask me about pending payments, fleet costs, or cash flow." }
+    { id: 1, sender: 'bot', text: "Hello! I am connected to your live business data. Ask me about pending bills, expenses, or fleet status." }
   ]);
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef(null);
 
-  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  useEffect(scrollToBottom, [messages]);
+  // FETCH LIVE DATA FOR CONTEXT
+  useEffect(() => {
+    // 1. Invoices (Simplified for AI Context)
+    onValue(ref(db, 'invoices'), (snap) => {
+      const data = snap.val() ? Object.values(snap.val()) : [];
+      const simpleInvoices = data.map(inv => {
+        const total = (inv.items||[]).reduce((s,i)=>s+Number(i.amount),0);
+        const gst = inv.isGst ? total * 0.18 : 0;
+        const grand = Math.round(total + gst - (Number(inv.discount)||0));
+        const paid = Number(inv.advances) || 0;
+        return {
+            client: inv.client.name,
+            total: grand,
+            balance: grand - paid,
+            status: (grand - paid) <= 0 ? "Paid" : "Pending"
+        };
+      });
+      setContextData(prev => ({ ...prev, invoices: simpleInvoices }));
+    });
+
+    // 2. Expenses (Last 30 only)
+    onValue(ref(db, 'cashbook'), (snap) => {
+      const data = snap.val() ? Object.values(snap.val()) : [];
+      const recent = data.sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0, 30).map(e => ({
+          date: e.date,
+          category: e.category,
+          amount: e.amount,
+          type: e.type
+      }));
+      setContextData(prev => ({ ...prev, expenses: recent }));
+    });
+
+    // 3. Fleet
+    onValue(ref(db, 'fleet_data'), (snap) => {
+        setContextData(prev => ({ ...prev, fleet: snap.val() || {} }));
+    });
+
+    // 4. Workers
+    onValue(ref(db, 'workers'), (snap) => {
+        const data = snap.val() ? Object.values(snap.val()) : [];
+        setContextData(prev => ({ ...prev, workers: data.map(w => w.name) }));
+    });
+
+  }, []);
+
+  // SCROLL TO BOTTOM
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+
+  // ==========================================
+  // 2. AI LOGIC (Google Gemini API)
+  // ==========================================
+  
+  const generateAIResponse = async (userQuestion) => {
+    // Access the key from your .env file
+    const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
+    
+    if (!API_KEY) {
+        return "⚠️ Setup Error: Google API Key is missing. Please check your .env file.";
+    }
+
+    // Prepare the "Context" - summarized data for the AI to read
+    const pendingInvoices = contextData.invoices.filter(i => i.balance > 0);
+    const totalPending = pendingInvoices.reduce((s, i) => s + i.balance, 0);
+    
+    const systemPrompt = `
+      You are an intelligent business assistant for "Baldigambar Enterprises".
+      
+      HERE IS THE LIVE BUSINESS DATA:
+      - Total Pending Money to Collect: ₹${totalPending}
+      - Pending Invoice List: ${JSON.stringify(pendingInvoices.slice(0, 15))}
+      - Recent Expenses: ${JSON.stringify(contextData.expenses.slice(0, 10))}
+      - Staff Names: ${JSON.stringify(contextData.workers)}
+      - Vehicles: ${JSON.stringify(Object.keys(contextData.fleet))}
+
+      USER QUESTION: "${userQuestion}"
+
+      INSTRUCTIONS:
+      - Answer the question using ONLY the data above.
+      - If asking about pending money, tell them exactly who owes what.
+      - Keep answers short, professional, and direct.
+      - If the answer isn't in the data, say "I don't see that in the current records."
+    `;
+
+    try {
+      // Call Google Gemini 1.5 Flash
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: systemPrompt }] }]
+        })
+      });
+
+      const data = await response.json();
+      
+      if (data.error) {
+          console.error("AI Error:", data.error);
+          return "I encountered an error connecting to Google AI. Please check your API Key.";
+      }
+
+      return data.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't generate a response.";
+
+    } catch (error) {
+      return "I am having trouble connecting to the internet.";
+    }
+  };
 
   const handleSend = async (e) => {
     e.preventDefault();
     if (!input.trim()) return;
 
-    const userMsg = input;
-    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    // 1. Add User Message
+    const userMsg = { id: Date.now(), sender: 'user', text: input };
+    setMessages(prev => [...prev, userMsg]);
     setInput('');
     setIsTyping(true);
 
-    // SIMULATED AI RESPONSE (Since we don't have a real OpenAI Key here)
-    // In a real app, you would send 'businessData' + 'userMsg' to GPT-4
-    setTimeout(() => {
-      let aiResponse = "I'm analyzing your request...";
-      const lower = userMsg.toLowerCase();
+    // 2. Get AI Response
+    const answer = await generateAIResponse(userMsg.text);
 
-      if (lower.includes('pending') || lower.includes('due') || lower.includes('money')) {
-        aiResponse = `Based on your live invoices, you have a total of ₹${businessData.pendingDues.toLocaleString()} pending from clients. You should check the Billing tab to send reminders.`;
-      } 
-      else if (lower.includes('cash') || lower.includes('balance') || lower.includes('bank')) {
-        aiResponse = `Your current Net Cash Balance (Income - Expense) is ₹${businessData.cashBalance.toLocaleString()}.`;
-        if(businessData.cashBalance < 0) aiResponse += " Warning: You are in negative cash flow.";
-      }
-      else if (lower.includes('fleet') || lower.includes('fuel') || lower.includes('vehicle')) {
-        aiResponse = `Your fleet data shows that ${businessData.highExpenseVehicle} has the highest fuel consumption right now. You might want to check its mileage or service status.`;
-      }
-      else if (lower.includes('hello') || lower.includes('hi')) {
-        aiResponse = "Welcome back, Boss! Your system is running smoothly on the Cloud. What data do you need?";
-      }
-      else {
-        aiResponse = "I can help you track Pending Dues, Cash Balance, or Fleet Expenses. Try asking 'How much money is pending?'";
-      }
-
-      setMessages(prev => [...prev, { role: 'ai', text: aiResponse }]);
-      setIsTyping(false);
-    }, 1000);
+    // 3. Add Bot Message
+    const botMsg = { id: Date.now() + 1, sender: 'bot', text: answer };
+    setMessages(prev => [...prev, botMsg]);
+    setIsTyping(false);
   };
 
+  // ==========================================
+  // 3. RENDER UI
+  // ==========================================
   return (
-    <div className="h-[calc(100vh-140px)] flex flex-col bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-fade-in">
+    <div className="h-[85vh] flex flex-col bg-white rounded-2xl border border-slate-200 shadow-xl overflow-hidden animate-fade-in max-w-4xl mx-auto">
       
       {/* Header */}
-      <div className="bg-slate-900 text-white p-4 flex justify-between items-center shadow-md">
+      <div className="p-4 bg-slate-900 text-white flex justify-between items-center shadow-md">
         <div className="flex items-center gap-3">
-           <div className="bg-orange-500 p-2 rounded-lg"><BrainCircuit size={20} className="text-white"/></div>
-           <div>
-             <h3 className="font-bold text-sm">Baldigambar AI</h3>
-             <p className="text-[10px] text-slate-400 font-bold flex items-center gap-1">
-               {loadingData ? <><Loader size={10} className="animate-spin"/> Syncing Data...</> : <><CheckCircle size={10} className="text-green-500"/> Live Cloud Data</>}
-             </p>
-           </div>
+          <div className="bg-gradient-to-r from-blue-500 to-purple-500 p-2 rounded-xl">
+            <BrainCircuit size={24} className="text-white" />
+          </div>
+          <div>
+            <h3 className="font-bold text-lg leading-tight">Smart Assistant</h3>
+            <div className="flex items-center gap-1.5">
+               <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
+               <p className="text-[10px] font-medium text-slate-300 uppercase tracking-wider">Gemini Connected</p>
+            </div>
+          </div>
+        </div>
+        <div className="text-right hidden sm:block">
+           <p className="text-[10px] text-slate-400">Powered by</p>
+           <p className="text-xs font-bold text-white">Google AI</p>
         </div>
       </div>
 
-      {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
-        
-        {/* Insight Cards (Auto-Generated) */}
-        {!loadingData && messages.length === 1 && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
-            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-               <div className="flex items-center gap-2 mb-1 text-slate-400 text-xs font-bold uppercase"><AlertTriangle size={14} className="text-orange-500"/> Action Item</div>
-               <div className="font-bold text-slate-700">Collect Pending Dues</div>
-               <div className="text-2xl font-black text-slate-900">₹{businessData.pendingDues.toLocaleString()}</div>
-            </div>
-            <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-               <div className="flex items-center gap-2 mb-1 text-slate-400 text-xs font-bold uppercase"><TrendingUp size={14} className="text-emerald-500"/> Current Health</div>
-               <div className="font-bold text-slate-700">Net Cash Balance</div>
-               <div className={`text-2xl font-black ${businessData.cashBalance >=0 ? 'text-emerald-600' : 'text-red-600'}`}>₹{businessData.cashBalance.toLocaleString()}</div>
-            </div>
-          </div>
-        )}
-
-        {messages.map((msg, i) => (
-          <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[80%] p-4 rounded-2xl text-sm font-medium leading-relaxed shadow-sm ${msg.role === 'user' ? 'bg-slate-900 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'}`}>
-              {msg.text}
+      {/* Chat Area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-6 bg-slate-50">
+        {messages.map((msg) => (
+          <div key={msg.id} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[80%] p-4 rounded-2xl shadow-sm whitespace-pre-wrap ${msg.sender === 'user' ? 'bg-slate-900 text-white rounded-tr-none' : 'bg-white text-slate-700 border border-slate-200 rounded-tl-none'}`}>
+              {msg.sender === 'bot' && (
+                  <div className="flex items-center gap-2 mb-2 border-b border-slate-100 pb-1">
+                      <Sparkles size={14} className="text-purple-500"/> 
+                      <span className="text-[10px] font-bold text-slate-400 uppercase">Analysis</span>
+                  </div>
+              )}
+              <p className="text-sm font-medium leading-relaxed">{msg.text}</p>
             </div>
           </div>
         ))}
+        
         {isTyping && (
            <div className="flex justify-start">
-             <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-slate-100 flex gap-1">
-               <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce"></span>
-               <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce delay-75"></span>
-               <span className="w-2 h-2 bg-slate-400 rounded-full animate-bounce delay-150"></span>
+             <div className="bg-white p-4 rounded-2xl rounded-tl-none border border-slate-200 flex gap-1 items-center shadow-sm">
+               <Loader size={16} className="animate-spin text-purple-500"/>
+               <span className="text-xs font-bold text-slate-400 ml-2">Thinking...</span>
              </div>
            </div>
         )}
@@ -182,13 +214,20 @@ export default function AIAssistant() {
           <input 
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about your business..." 
-            className="w-full bg-slate-100 border-none rounded-xl py-3 pl-4 pr-12 font-bold text-slate-700 outline-none focus:ring-2 focus:ring-orange-100 placeholder:text-slate-400"
+            placeholder="Ask: 'Who owes money?', 'Total fuel cost?', etc." 
+            className="w-full bg-slate-100 border-none rounded-xl py-4 pl-4 pr-14 font-bold text-slate-700 outline-none focus:ring-2 focus:ring-slate-900 placeholder:text-slate-400 transition-all"
           />
-          <button className="absolute right-2 p-2 bg-orange-500 hover:bg-orange-600 text-white rounded-lg transition-colors">
-            <Send size={18} />
+          <button 
+            type="submit" 
+            disabled={!input.trim() || isTyping}
+            className="absolute right-2 p-2 bg-slate-900 text-white rounded-lg hover:bg-black disabled:opacity-50 transition-colors shadow-lg"
+          >
+            <Send size={20} />
           </button>
         </div>
+        <p className="text-[10px] text-center text-slate-400 mt-2 font-medium flex items-center justify-center gap-1">
+           <Info size={10}/> AI answers based on live data. Verify important financial figures.
+        </p>
       </form>
     </div>
   );
