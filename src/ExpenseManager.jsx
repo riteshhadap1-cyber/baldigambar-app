@@ -8,9 +8,10 @@ import {
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
-import { ref, onValue, push, remove, set } from 'firebase/database';
+// ADDED: query, orderByChild, startAt, endAt to filter data by date on the server
+import { ref, onValue, push, remove, set, query, orderByChild, startAt, endAt } from 'firebase/database';
 
-export default function ExpenseManager({ isAdmin }) { // <--- RECEIVES ADMIN PROP
+export default function ExpenseManager({ isAdmin }) { 
   
   // ==========================================
   // 1. DATABASE & STATE (CLOUD CONNECTED)
@@ -48,11 +49,22 @@ export default function ExpenseManager({ isAdmin }) { // <--- RECEIVES ADMIN PRO
   }, [categories, sites]);
 
   // ==========================================
-  // 2. LIVE CLOUD CONNECTION
+  // 2. LIVE CLOUD CONNECTION (OPTIMIZED)
   // ==========================================
   useEffect(() => {
-    // 1. Listen to Cashbook Transactions
-    onValue(ref(db, 'cashbook'), (snapshot) => {
+    // 1. Listen to Cashbook Transactions - FILTERED BY MONTH
+    // This query asks Firebase to only send data where 'date' starts with the selected month (e.g., "2024-02")
+    const monthStart = filter.month;
+    const monthEnd = filter.month + "\uf8ff"; // \uf8ff is a special character that comes after all other characters
+    
+    const monthlyQuery = query(
+      ref(db, 'cashbook'), 
+      orderByChild('date'), 
+      startAt(monthStart), 
+      endAt(monthEnd)
+    );
+
+    const unsubTransactions = onValue(monthlyQuery, (snapshot) => {
       const data = snapshot.val();
       const loaded = data ? Object.keys(data).map(key => ({ id: key, ...data[key] })) : [];
       // Sort by newest date first
@@ -61,26 +73,34 @@ export default function ExpenseManager({ isAdmin }) { // <--- RECEIVES ADMIN PRO
     });
 
     // 2. Listen to Categories
-    onValue(ref(db, 'exp_categories'), (snapshot) => {
+    const unsubCategories = onValue(ref(db, 'exp_categories'), (snapshot) => {
       const data = snapshot.val();
       if(data) setCategories(data);
     });
 
     // 3. Listen to Sites
-    onValue(ref(db, 'sites'), (snapshot) => {
+    const unsubSites = onValue(ref(db, 'sites'), (snapshot) => {
       const data = snapshot.val();
       if(data) setSites(data);
     });
 
     // 4. Listen to Budget Settings
-    onValue(ref(db, 'budget_settings'), (snapshot) => {
+    const unsubBudget = onValue(ref(db, 'budget_settings'), (snapshot) => {
       const data = snapshot.val();
       if(data) {
         setBudget(data.amount || 50000);
         setBudgetEnabled(data.enabled !== false);
       }
     });
-  }, []);
+
+    // Cleanup listeners when component unmounts or month changes
+    return () => {
+      unsubTransactions();
+      unsubCategories();
+      unsubSites();
+      unsubBudget();
+    };
+  }, [filter.month]); // <--- Key Change: Re-run this effect when the month changes
 
   // ==========================================
   // 3. ACTIONS (PROTECTED)
@@ -152,12 +172,13 @@ export default function ExpenseManager({ isAdmin }) { // <--- RECEIVES ADMIN PRO
   };
 
   // --- FILTER & STATS ---
+  // Note: 'transactions' now only contains data for the selected MONTH due to the query above.
   const filteredTransactions = transactions.filter(e => {
     const matchType = filter.type === 'All' || e.type === filter.type;
     const matchCat = filter.category === 'All' || e.category === filter.category;
     const matchSite = filter.site === 'All' || e.site === filter.site;
-    const matchMonth = e.date.startsWith(filter.month);
-    return matchType && matchCat && matchSite && matchMonth;
+    // We don't need to filter by month here in JS anymore, because Firebase did it for us!
+    return matchType && matchCat && matchSite;
   });
   
   const totalExpense = filteredTransactions.filter(t => t.type === 'Expense').reduce((sum, e) => sum + e.amount, 0);
@@ -342,7 +363,7 @@ export default function ExpenseManager({ isAdmin }) { // <--- RECEIVES ADMIN PRO
           </div>
 
           <div className="flex-1 overflow-y-auto">
-            {filteredTransactions.length === 0 ? <div className="p-8 text-center text-slate-400 font-bold">No records found.</div> : 
+            {filteredTransactions.length === 0 ? <div className="p-8 text-center text-slate-400 font-bold">No records found for this month.</div> : 
             <table className="w-full text-sm text-left">
               <thead className="bg-slate-50 text-slate-500 font-bold text-xs uppercase sticky top-0 print:bg-white print:text-black">
                 <tr><th className="p-4">Date</th><th className="p-4">Details</th><th className="p-4">Payee/Mode</th><th className="p-4 text-right">Amount</th><th className="p-4 text-center no-print">Act</th></tr>
@@ -382,7 +403,7 @@ export default function ExpenseManager({ isAdmin }) { // <--- RECEIVES ADMIN PRO
               </tbody>
               <tfoot className="bg-slate-50 border-t-2 border-slate-200 print:bg-white print:border-black sticky bottom-0">
                 <tr>
-                  <td colSpan="3" className="p-4 text-right font-black uppercase text-xs text-slate-500">Net Balance:</td>
+                  <td colSpan="3" className="p-4 text-right font-black uppercase text-xs text-slate-500">Net Balance (This Month):</td>
                   <td className={`p-4 text-right font-black text-xl ${netBalance >= 0 ? 'text-green-600' : 'text-red-600'}`}>₹{netBalance.toLocaleString()}</td>
                   <td></td>
                 </tr>

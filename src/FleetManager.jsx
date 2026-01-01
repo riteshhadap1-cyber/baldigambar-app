@@ -4,11 +4,12 @@ import {
   User, Wrench, TrendingUp, AlertTriangle, Search, Droplet, 
   Calendar, DollarSign, FileText, ChevronDown, ChevronUp, History,
   Download, PieChart, Activity, CalendarDays, Lock,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, RefreshCw
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
-import { ref, onValue, push, remove, update, set } from 'firebase/database';
+// ADDED: query, orderByChild, startAt, endAt, get, increment
+import { ref, onValue, push, remove, update, set, query, orderByChild, startAt, endAt, get, increment } from 'firebase/database';
 
 export default function FleetManager({ isAdmin }) { 
   
@@ -42,20 +43,31 @@ export default function FleetManager({ isAdmin }) {
   const [newVehicleName, setNewVehicleName] = useState('');
 
   // ==========================================
-  // 2. LIVE CLOUD LISTENERS
+  // 2. LIVE CLOUD LISTENERS (OPTIMIZED)
   // ==========================================
   useEffect(() => {
-    // 1. Listen for Entries
-    const entriesRef = ref(db, 'fleet_entries');
-    onValue(entriesRef, (snapshot) => {
+    // 1. Listen for Entries - FILTERED BY MONTH
+    const monthStart = viewMonth;
+    const monthEnd = viewMonth + "\uf8ff";
+    
+    const entriesQuery = query(
+      ref(db, 'fleet_entries'), 
+      orderByChild('date'), 
+      startAt(monthStart), 
+      endAt(monthEnd)
+    );
+
+    const unsubEntries = onValue(entriesQuery, (snapshot) => {
       const data = snapshot.val();
       const loaded = data ? Object.keys(data).map(key => ({ id: key, ...data[key] })) : [];
+      // Sort by newest first
+      loaded.sort((a, b) => new Date(b.date) - new Date(a.date));
       setEntries(loaded);
     });
 
     // 2. Listen for Fleet Data
     const dataRef = ref(db, 'fleet_data');
-    onValue(dataRef, (snapshot) => {
+    const unsubData = onValue(dataRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
         const normalized = {};
@@ -75,11 +87,17 @@ export default function FleetManager({ isAdmin }) {
 
     // 3. Listen for Vehicle List
     const vehicleRef = ref(db, 'fleet_vehicles');
-    onValue(vehicleRef, (snapshot) => {
+    const unsubVehicles = onValue(vehicleRef, (snapshot) => {
       const data = snapshot.val();
       if (data) setVehicles(data);
     });
-  }, []);
+
+    return () => {
+      unsubEntries();
+      unsubData();
+      unsubVehicles();
+    };
+  }, [viewMonth]); // Re-run when month changes
 
   // ==========================================
   // 3. LOGIC & CALCULATIONS
@@ -100,16 +118,15 @@ export default function FleetManager({ isAdmin }) {
     return date.toLocaleString('default', { month: 'long', year: 'numeric' });
   };
 
-  // Filter Logbook by Month & Search
+  // Filter Logbook by Search (Date filtering is now handled by Firebase)
   const filteredEntries = useMemo(() => {
     return entries.filter(e => {
-      const matchesMonth = e.date.startsWith(viewMonth);
       const matchesTab = activeTab === 'All' || e.machine === activeTab;
       const matchesSearch = (e.client || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
                             (e.machine || '').toLowerCase().includes(searchQuery.toLowerCase());
-      return matchesMonth && matchesTab && matchesSearch;
-    }).sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [entries, activeTab, viewMonth, searchQuery]);
+      return matchesTab && matchesSearch;
+    });
+  }, [entries, activeTab, searchQuery]);
 
   // Financials
   const totalIncome = filteredEntries.reduce((sum, item) => sum + Number(item.amount), 0);
@@ -149,8 +166,10 @@ export default function FleetManager({ isAdmin }) {
     return Object.entries(stats).sort((a,b) => b[1] - a[1]); 
   }, [filteredEntries]);
 
+  // UPDATED: Service Status now uses a dedicated 'totalRunningHours' field in fleet_data
+  // This prevents the calculation from breaking when we stop loading old entries.
   const getServiceStatus = (vehicle) => {
-    const lifetimeHours = entries.filter(e => e.machine === vehicle).reduce((sum, e) => sum + Number(e.hours || 0), 0);
+    const lifetimeHours = fleetData[vehicle]?.totalRunningHours || 0;
     const lastServiceAt = fleetData[vehicle]?.lastServiceHours || 0;
     const hoursRun = lifetimeHours - lastServiceAt;
     const percent = Math.min((hoursRun / serviceInterval) * 100, 100);
@@ -164,6 +183,26 @@ export default function FleetManager({ isAdmin }) {
   const updateVehicleData = (vehicle, field, value) => {
     if (!isAdmin) return; 
     update(ref(db, `fleet_data/${vehicle}`), { [field]: value });
+  };
+
+  // --- MIGRATION TOOL (ONE TIME USE) ---
+  const syncTotalHours = async () => {
+    if(!confirm("Recalculate total hours for all machines from history? Do this only once.")) return;
+    
+    const snapshot = await get(ref(db, 'fleet_entries'));
+    const allEntries = snapshot.val() || {};
+    const totals = {};
+    
+    Object.values(allEntries).forEach(e => {
+        if(e.machine && e.hours) {
+            totals[e.machine] = (totals[e.machine] || 0) + Number(e.hours);
+        }
+    });
+
+    Object.keys(totals).forEach(machine => {
+        update(ref(db, `fleet_data/${machine}`), { totalRunningHours: totals[machine] });
+    });
+    alert("Sync Complete! Service timers are now accurate.");
   };
 
   const addHistoryEntry = (e, type) => {
@@ -194,8 +233,8 @@ export default function FleetManager({ isAdmin }) {
   const resetService = (vehicle) => {
     if (!isAdmin) return;
     if(confirm(`Reset Service Timer for ${vehicle}? Confirm only if Oil Change is done.`)) {
-      const lifetimeHours = entries.filter(e => e.machine === vehicle).reduce((sum, e) => sum + Number(e.hours || 0), 0);
-      update(ref(db, `fleet_data/${vehicle}`), { lastServiceHours: lifetimeHours });
+      const currentTotal = fleetData[vehicle]?.totalRunningHours || 0;
+      update(ref(db, `fleet_data/${vehicle}`), { lastServiceHours: currentTotal });
     }
   };
 
@@ -204,19 +243,37 @@ export default function FleetManager({ isAdmin }) {
     if (!isAdmin) return;
     if (!form.amount) return;
     const machineName = activeTab === 'All' ? form.machine : activeTab;
-    
+    const hrs = Number(form.hours) || 0;
+
+    // 1. Add Entry Log
     push(ref(db, 'fleet_entries'), {
         ...form,
         machine: machineName,
         isPaid: false,
         timestamp: Date.now()
     });
+
+    // 2. Atomically Increment Total Hours (Fixes Service Interval Bug)
+    if (hrs > 0) {
+        update(ref(db, `fleet_data/${machineName}`), {
+            totalRunningHours: increment(hrs)
+        });
+    }
+
     setForm({ ...form, client: '', time: '', hours: '', amount: '' }); 
   };
 
-  const deleteEntry = (id) => { 
+  const deleteEntry = (id, machine, hours) => { 
     if (!isAdmin) return;
-    if(confirm("Delete this entry?")) remove(ref(db, `fleet_entries/${id}`));
+    if(confirm("Delete this entry?")) {
+        remove(ref(db, `fleet_entries/${id}`));
+        // Decrease running hours if entry deleted
+        if(hours > 0 && machine) {
+            update(ref(db, `fleet_data/${machine}`), {
+                totalRunningHours: increment(-hours)
+            });
+        }
+    }
   };
 
   const togglePaymentStatus = (id, currentStatus) => {
@@ -231,18 +288,6 @@ export default function FleetManager({ isAdmin }) {
         set(ref(db, 'fleet_vehicles'), newVehiclesList);
         setNewVehicleName(''); 
     } 
-  };
-
-  const downloadCSV = () => {
-    const headers = ["Date", "Machine", "Client", "Time", "Work(Hrs)", "Amount", "Status"];
-    const rows = filteredEntries.map(e => [e.date, e.machine, e.client, e.time, e.hours, e.amount, e.isPaid ? "Paid" : "Pending"]);
-    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `fleet_report_${activeTab}_${viewMonth}.csv`);
-    document.body.appendChild(link);
-    link.click();
   };
 
   // ==========================================
@@ -391,7 +436,11 @@ export default function FleetManager({ isAdmin }) {
                   <button disabled={!isAdmin} onClick={addVehicle} className="bg-slate-800 text-white px-4 rounded-lg font-bold disabled:opacity-50">Add</button>
               </div>
           </div>
-          <div><h4 className="font-bold text-xs uppercase text-slate-400 mb-2">Service Interval</h4><div className="flex items-center gap-2"><span className="text-sm font-bold text-slate-600">Every</span><input type="number" className="w-20 border p-1 rounded font-bold text-center" value={serviceInterval} onChange={e => setServiceInterval(Number(e.target.value))} /><span className="text-sm font-bold text-slate-600">hours</span></div></div>
+          <div>
+            <h4 className="font-bold text-xs uppercase text-slate-400 mb-2">Service Interval</h4>
+            <div className="flex items-center gap-2 mb-2"><span className="text-sm font-bold text-slate-600">Every</span><input type="number" className="w-20 border p-1 rounded font-bold text-center" value={serviceInterval} onChange={e => setServiceInterval(Number(e.target.value))} /><span className="text-sm font-bold text-slate-600">hours</span></div>
+            <button onClick={syncTotalHours} className="text-xs bg-orange-100 text-orange-700 px-3 py-1 rounded hover:bg-orange-200 flex items-center gap-1"><RefreshCw size={12}/> Sync Total Hours</button>
+          </div>
         </div>
       )}
 
@@ -486,7 +535,7 @@ export default function FleetManager({ isAdmin }) {
                     </button>
                 </td>
                 <td className="p-3 text-center print:hidden opacity-0 group-hover:opacity-100">
-                    {isAdmin && <button onClick={(e) => {e.stopPropagation(); deleteEntry(item.id)}} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>}
+                    {isAdmin && <button onClick={(e) => {e.stopPropagation(); deleteEntry(item.id, item.machine, item.hours)}} className="text-slate-300 hover:text-red-500"><Trash2 size={16}/></button>}
                 </td>
               </tr>
             ))}
