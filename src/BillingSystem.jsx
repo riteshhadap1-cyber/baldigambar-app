@@ -136,6 +136,8 @@ export default function BillingSystem({ isAdmin }) {
 
   // Number to Words Converter (Indian Format)
   const numToWords = (num) => {
+    if (num === 0) return "Zero";
+    
     const a = ['','One ','Two ','Three ','Four ','Five ','Six ','Seven ','Eight ','Nine ','Ten ','Eleven ','Twelve ','Thirteen ','Fourteen ','Fifteen ','Sixteen ','Seventeen ','Eighteen ','Nineteen '];
     const b = ['', '', 'Twenty','Thirty','Forty','Fifty','Sixty','Seventy','Eighty','Ninety'];
     
@@ -370,8 +372,19 @@ export default function BillingSystem({ isAdmin }) {
 
           <div className="mb-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
              <label className="text-xs font-bold text-gray-400 uppercase flex items-center gap-2 mb-2"><Upload size={14}/> Upload Signature (Image)</label>
-             <input type="file" accept="image/*" onChange={handleSignatureUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100"/>
-             {bizProfile.signature && <img src={bizProfile.signature} alt="Sig" className="h-16 mt-2 border border-slate-300 bg-white p-1 rounded" />}
+             <div className="flex gap-2 items-center">
+                <input type="file" accept="image/*" onChange={handleSignatureUpload} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-bold file:bg-orange-50 file:text-orange-700 hover:file:bg-orange-100"/>
+                {bizProfile.signature && (
+                  <button onClick={() => setBizProfile(prev => ({...prev, signature: null}))} className="text-red-500 font-bold text-xs hover:bg-red-50 px-3 py-2 rounded-lg border border-red-200">
+                    Remove
+                  </button>
+                )}
+             </div>
+             {bizProfile.signature && (
+                <div className="mt-4 p-2 bg-white border border-slate-200 inline-block rounded">
+                  <img src={bizProfile.signature} alt="Sig" className="h-16" />
+                </div>
+             )}
           </div>
           
           <button onClick={saveSettings} className="mt-6 bg-slate-900 text-white px-8 py-3 rounded-xl font-bold shadow-lg hover:bg-black w-full">Save Settings to Cloud</button>
@@ -412,19 +425,15 @@ export default function BillingSystem({ isAdmin }) {
       {activeTab === 'create' && (
         <div className="flex flex-col lg:flex-row gap-6">
           
-          {/* LEFT: CONTROLS */}
+          {/* LEFT: CONTROLS (HIDDEN FOR FAMILY IF YOU WANT, OR READ ONLY) */}
           <div className="lg:w-1/3 space-y-4 no-print animate-fade-in">
             {isAdmin ? (
               <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
                 <h4 className="font-bold text-slate-700 uppercase mb-4 flex items-center gap-2"><Settings size={16}/> Invoice Details</h4>
-                
-                {/* Basic Fields */}
                 <div className="grid grid-cols-2 gap-4 mb-4">
                   <div><label className="text-xs font-bold text-gray-400 uppercase">Bill Type</label><select className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={formData.type} onChange={e => setFormData({...formData, type: e.target.value})}><option>TAX INVOICE</option><option>QUOTATION</option><option>DELIVERY CHALLAN</option></select></div>
                   <div><label className="text-xs font-bold text-gray-400 uppercase">Date</label><input type="date" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={formData.date} onChange={e => setFormData({...formData, date: e.target.value})} /></div>
                 </div>
-                
-                {/* Client Search */}
                 <div className="mb-4 relative">
                   <label className="text-xs font-bold text-gray-400 uppercase">Client Name</label>
                   <div className="flex gap-2">
@@ -433,15 +442,13 @@ export default function BillingSystem({ isAdmin }) {
                     <button onClick={() => selectClient(formData.client.name)} className="bg-orange-100 text-orange-600 p-2.5 rounded-lg hover:bg-orange-200"><Search size={20}/></button>
                   </div>
                 </div>
-                
                 <div className="mb-4"><label className="text-xs font-bold text-gray-400 uppercase">Address</label><textarea rows="2" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold text-sm focus:border-orange-500 outline-none" value={formData.client.address} onChange={e => setFormData({...formData, client: { ...formData.client, address: e.target.value }})} /></div>
-                
                 <div className="grid grid-cols-2 gap-4">
                   <div><label className="text-xs font-bold text-gray-400 uppercase">Mobile</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.mobile} onChange={e => setFormData({...formData, client: { ...formData.client, mobile: e.target.value }})} /></div>
                   <div><label className="text-xs font-bold text-gray-400 uppercase">GSTIN</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={formData.client.gstin} onChange={e => setFormData({...formData, client: { ...formData.client, gstin: e.target.value }})} /></div>
                 </div>
 
-                {/* Calculations Area */}
+                {/* CALCULATIONS BOX */}
                 <div className="mt-6 pt-4 border-t border-slate-100">
                   <div className="flex items-center justify-between mb-4">
                     <h4 className="font-bold text-gray-700 uppercase text-sm">Calculations</h4>
@@ -532,7 +539,7 @@ export default function BillingSystem({ isAdmin }) {
                       <span className="text-red-600 text-xl font-bold">✽</span>
                    </div>
                    
-                   {/* Description List */}
+                   {/* Description List (FULLY CLEANED - No Citations) */}
                    <p className={`text-center font-bold text-red-700 mt-1 leading-relaxed px-4 ${paperSize === 'A5' ? 'text-[8px]' : 'text-sm'}`}>
                      सिमेंट प्लेट, सिमेंट पोल, रेडीमेन प्लेट, कंपाऊंड योग्य दरात करून मिळेल व 
                      वाळू, डबर, विट, शेणखत, लाल माती व फार्म हाऊस योग्य दरात डेव्हलप करून मिळेल 
@@ -554,6 +561,7 @@ export default function BillingSystem({ isAdmin }) {
                 </div>
                 <div className="flex gap-2">
                    <span>दिनांक :</span>
+                   {/* DATE FORMAT */}
                    <span className="text-black underline decoration-dotted underline-offset-4">{new Date(formData.date).toLocaleDateString('en-IN')}</span>
                 </div>
               </div>
@@ -584,7 +592,7 @@ export default function BillingSystem({ isAdmin }) {
                     {formData.items.map((item, index) => (
                       <tr key={item.id} className="border-b border-red-200">
                         
-                        {/* Date */}
+                        {/* Date (Item specific) */}
                         <td className="p-1 border-r border-red-600 text-center">
                            <input disabled={!isAdmin} type="text" className="w-full bg-transparent outline-none text-center font-bold text-black text-xs" placeholder="" value={item.date || ''} onChange={e => handleItemChange(item.id, 'date', e.target.value)} />
                         </td>
@@ -612,12 +620,12 @@ export default function BillingSystem({ isAdmin }) {
                            </div>
                         </td>
 
-                        {/* Brass */}
+                        {/* Brass (Editable) */}
                         <td className="p-1 border-r border-red-600 text-center">
                            <input disabled={!isAdmin} type="number" className="w-full bg-transparent outline-none text-center font-bold text-black" placeholder="0" value={item.brass > 0 ? item.brass : ''} onChange={e => handleItemChange(item.id, 'brass', e.target.value)} />
                         </td>
 
-                        {/* Trip */}
+                        {/* Trip (Editable) */}
                         <td className="p-1 border-r border-red-600 text-center">
                            <input disabled={!isAdmin} type="number" className="w-full bg-transparent outline-none text-center font-bold text-black" placeholder="0" value={item.trip > 0 ? item.trip : ''} onChange={e => handleItemChange(item.id, 'trip', e.target.value)} />
                         </td>
@@ -658,8 +666,8 @@ export default function BillingSystem({ isAdmin }) {
                    <div>
                      <div className="flex flex-wrap gap-2 mb-2">
                        <span className={`font-bold whitespace-nowrap ${paperSize === 'A5' ? 'text-[9px]' : 'text-xs'}`}>अक्षरी रुपये :</span>
-                       {/* Fixed Word Wrapping */}
-                       <span className={`border-b border-dotted border-red-600 flex-1 font-bold text-black italic px-2 capitalize break-words whitespace-pre-wrap ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>{numToWords(grandTotal)} Only.</span>
+                       {/* Fixed Word Wrapping - NOW USING BALANCE DUE */}
+                       <span className={`border-b border-dotted border-red-600 flex-1 font-bold text-black italic px-2 capitalize break-words whitespace-pre-wrap ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>{numToWords(balanceDue)} Only.</span>
                      </div>
                      {bizProfile.bankName && (
                         <div className={`font-bold mt-4 ${paperSize === 'A5' ? 'text-[9px]' : 'text-xs'}`}>
@@ -691,7 +699,16 @@ export default function BillingSystem({ isAdmin }) {
                    
                    {/* Signature Area */}
                    <div className="p-2 text-center mt-2 h-24 flex flex-col justify-end">
-                      {bizProfile.signature && <img src={bizProfile.signature} alt="Sig" className="h-10 mx-auto mb-1" />}
+                      {bizProfile.signature ? (
+                        <img 
+                          src={bizProfile.signature} 
+                          alt="Sig" 
+                          className={`mx-auto mb-1 ${paperSize === 'A5' ? 'h-10' : 'h-14'}`} 
+                          style={{ mixBlendMode: 'multiply' }} 
+                        />
+                      ) : (
+                        <div className="h-10"></div>
+                      )}
                       <p className="text-[10px]">बालदिगंबर इंटरप्राइजेस करिता</p>
                    </div>
                 </div>
