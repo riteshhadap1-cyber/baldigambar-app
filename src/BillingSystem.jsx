@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Plus, Trash2, Printer, Save, Settings, FileText, 
-  Search, Share2, Upload, Lock, Minimize, Maximize 
+  Search, Share2, Upload, Lock, Minimize, Maximize, FileType
 } from 'lucide-react';
 
 // FIREBASE IMPORTS
@@ -23,7 +23,7 @@ export default function BillingSystem({ isAdmin }) {
     tagline: 'जय अंबे बिल्डिंग मटेरियल सप्लायर्स',
     address: 'मु. गणेशगाव - चिंचवली, पो. कडाव, ता. कर्जत, जि. रायगड.',
     mobile: '9923465353', 
-    terms: 'Subject to Karjat Jurisdiction.',
+    terms: '', // Removed Jurisdiction Default
     signature: null
   });
 
@@ -46,6 +46,9 @@ export default function BillingSystem({ isAdmin }) {
   const [activeTab, setActiveTab] = useState('create'); 
   const [showStamp, setShowStamp] = useState(true);
   const [paperSize, setPaperSize] = useState('A4');
+  
+  // Letterhead State
+  const [letterContent, setLetterContent] = useState('');
 
   // ==========================================
   // 2. FIREBASE CONNECTION
@@ -219,41 +222,50 @@ export default function BillingSystem({ isAdmin }) {
   return (
     <div className="space-y-6 pb-20 font-sans text-slate-800 animate-fade-in">
       
-      {/* GLOBAL STYLES FOR PRINTING */}
+      {/* CRITICAL PRINT FIX */}
       <style>{`
         input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
         
         @media print {
-          /* RESET Everything for Flow */
-          html, body { height: auto !important; overflow: visible !important; }
-          #root { height: auto !important; }
+          /* 1. HIDE EVERYTHING by default */
+          body * { visibility: hidden; }
           
-          /* Hide UI */
-          aside, nav, header, .no-print { display: none !important; }
-          
-          /* FORCE BLOCK DISPLAY (Fixes "Cut-off" issue) */
-          main, .print-area { 
-            display: block !important; 
-            width: 100% !important; 
-            height: auto !important; 
-            overflow: visible !important; 
-            margin: 0 !important; 
+          /* 2. SHOW ONLY THE PRINT WRAPPER */
+          .print-wrapper, .print-wrapper * { visibility: visible; }
+
+          /* 3. POSITION IT AT THE TOP */
+          .print-wrapper {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            background: white;
+            z-index: 9999;
+          }
+
+          /* 4. RESET PAGE PROPERTIES */
+          html, body {
+            height: auto !important;
+            overflow: visible !important;
+            margin: 0 !important;
             padding: 0 !important;
           }
-          
-          /* Table Headers Repeat on New Page */
+
+          /* 5. TABLE HANDLING */
           thead { display: table-header-group; }
           tfoot { display: table-footer-group; }
           tr { page-break-inside: avoid; }
 
-          /* Colors & Borders */
-          body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; background: white !important; }
+          /* 6. COLORS */
+          body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           .border-red-600 { border-color: #dc2626 !important; }
           .text-red-600 { color: #dc2626 !important; }
           .bg-red-50 { background-color: #fef2f2 !important; }
           
-          /* Helpers */
+          .no-print { display: none !important; }
           .print-content-visible { display: block !important; }
           .print-input-hidden { display: none !important; }
         }
@@ -261,10 +273,11 @@ export default function BillingSystem({ isAdmin }) {
 
       {/* --- HEADER CONTROLS --- */}
       <div className="flex flex-col md:flex-row justify-between items-center gap-4 no-print">
-        <div className="flex gap-2 bg-white p-1 rounded-xl border border-gray-200 shadow-sm">
-          <button onClick={() => setActiveTab('create')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'create' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Create Bill</button>
-          <button onClick={() => setActiveTab('history')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'history' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>History</button>
-          {isAdmin && <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'settings' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}><Settings size={16}/></button>}
+        <div className="flex gap-2 bg-white p-1 rounded-xl border border-gray-200 shadow-sm overflow-x-auto w-full md:w-auto">
+          <button onClick={() => setActiveTab('create')} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap ${activeTab === 'create' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Create Bill</button>
+          <button onClick={() => setActiveTab('history')} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap ${activeTab === 'history' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>History</button>
+          <button onClick={() => setActiveTab('letterhead')} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap flex items-center gap-1 ${activeTab === 'letterhead' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}><FileType size={16}/> Letterhead</button>
+          {isAdmin && <button onClick={() => setActiveTab('settings')} className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap ${activeTab === 'settings' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}><Settings size={16}/></button>}
         </div>
         <div className="flex gap-2 items-center">
           <div className="flex bg-white p-1 rounded-xl border border-gray-200 shadow-sm items-center">
@@ -280,7 +293,7 @@ export default function BillingSystem({ isAdmin }) {
       {/* --- SETTINGS TAB --- */}
       {activeTab === 'settings' && isAdmin && (
         <div className="bg-white p-8 rounded-2xl shadow-lg border border-gray-100 max-w-3xl mx-auto animate-fade-in">
-          {/* ... (Same as before) ... */}
+          {/* Settings Fields */}
           <h3 className="text-xl font-black uppercase text-gray-800 mb-6 border-b pb-2">Business Profile</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
             <div><label className="text-xs font-bold text-gray-400 uppercase">Company Name</label><input className="w-full border-2 border-gray-100 p-3 rounded-lg font-bold outline-none" value={bizProfile.name} onChange={e => setBizProfile({...bizProfile, name: e.target.value})} /></div>
@@ -334,6 +347,59 @@ export default function BillingSystem({ isAdmin }) {
               {invoices.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-gray-400 italic">No invoices found.</td></tr>}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* --- LETTERHEAD TAB --- */}
+      {activeTab === 'letterhead' && (
+        <div className="flex justify-center animate-fade-in">
+           <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 flex flex-col ${
+                paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px]' : 'w-[210mm] min-h-[297mm] text-sm'
+              }`}>
+              
+              {/* BRAND HEADER (Reused) */}
+              <div className="mb-2">
+                <div className={`flex justify-between items-end font-bold text-red-600 mb-1 ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>
+                  <div className="text-left leading-tight"><p>प्रो. महेश हडप</p><p>मो. 9923465353</p></div>
+                  <div className={`text-center font-black ${paperSize === 'A5' ? 'text-sm' : 'text-lg'}`}>|| श्री गजानन प्रसन्न ||</div>
+                  <div className="text-right leading-tight"><p>प्रो. मोहन हडप</p><p>मो. 8329599213</p></div>
+                </div>
+                <div className="text-center">
+                   <h1 className={`font-black text-red-600 uppercase tracking-tighter ${paperSize === 'A5' ? 'text-3xl' : 'text-5xl'}`} style={{ textShadow: '1px 1px 0px rgba(0,0,0,0.1)' }}>{bizProfile.name}</h1>
+                   <div className="flex items-center justify-center gap-2 mt-1">
+                      <span className="text-red-600 text-xl font-bold">✽</span>
+                      <h2 className={`font-bold text-red-600 ${paperSize === 'A5' ? 'text-sm' : 'text-xl'}`}>{bizProfile.tagline}</h2>
+                      <span className="text-red-600 text-xl font-bold">✽</span>
+                   </div>
+                   <p className={`text-center font-bold text-red-700 mt-1 leading-relaxed px-4 ${paperSize === 'A5' ? 'text-[8px]' : 'text-sm'}`}>
+                     सिमेंट प्लेट, सिमेंट पोल, रेडीमेन प्लेट, कंपाऊंड योग्य दरात करून मिळेल व 
+                     वाळू, डबर, विट, शेणखत, लाल माती व फार्म हाऊस योग्य दरात डेव्हलप करून मिळेल 
+                     आणि इतर कंट्रक्शनची कामे योग्य दरात करून मिळतील.
+                   </p>
+                </div>
+                <div className="border-y-2 border-red-600 py-1 mt-2 text-center">
+                  <p className={`font-bold text-red-700 ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>{bizProfile.address}</p>
+                </div>
+              </div>
+
+              {/* EDITABLE BODY */}
+              <div className="flex-1 min-h-[500px]">
+                 <textarea 
+                    className="w-full h-full resize-none outline-none bg-transparent p-4 font-bold text-black placeholder:text-gray-200" 
+                    placeholder="Type official letter content here..."
+                    value={letterContent}
+                    onChange={(e) => setLetterContent(e.target.value)}
+                 />
+              </div>
+
+              {/* OPTIONAL SIGNATURE AT BOTTOM */}
+              <div className="mt-8 pt-8 flex justify-end">
+                 <div className="text-center">
+                    <p className="text-[10px] font-bold text-red-700">बालदिगंबर इंटरप्राइजेस करिता</p>
+                 </div>
+              </div>
+
+           </div>
         </div>
       )}
 
@@ -397,7 +463,7 @@ export default function BillingSystem({ isAdmin }) {
           {/* RIGHT: PREVIEW & PRINT AREA */}
           <div className="lg:w-2/3 bg-slate-100 p-4 lg:p-8 rounded-2xl overflow-auto print:p-0 print:bg-white print:w-full print:rounded-none flex justify-center">
             
-            <div className={`bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none print-area text-red-700 font-sans transition-all duration-300 ${
+            <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 ${
                 paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px]' : 'w-[210mm] min-h-[297mm] text-sm'
               }`}>
               
@@ -443,7 +509,7 @@ export default function BillingSystem({ isAdmin }) {
               </div>
 
               {/* TABLE */}
-              <div className="border-2 border-red-600 rounded-sm overflow-hidden flex flex-col print:block print:overflow-visible print:h-auto">
+              <div className="border-2 border-red-600 rounded-sm">
                 <table className={`w-full border-collapse ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>
                   <thead className="bg-red-50 text-red-700 border-b-2 border-red-600">
                     <tr>
@@ -494,11 +560,12 @@ export default function BillingSystem({ isAdmin }) {
                         </div>
                      )}
                    </div>
-                   <div className="mt-4 text-[10px] font-bold text-red-500">Subject to Karjat Jurisdiction.</div>
+                   {/* REMOVED: Jurisdiction text */}
                 </div>
 
                 <div className={`w-1/3 font-bold ${paperSize === 'A5' ? 'text-xs' : 'text-sm'}`}>
-                   {/* FIXED: VISIBLE BREAKDOWN ROWS */}
+                   
+                   {/* --- VISIBLE GST & DISCOUNT ROWS --- */}
                    { (formData.isGst || formData.discount > 0) && (
                      <>
                         <div className="flex border-b border-red-600"><div className="w-1/2 p-1 border-r border-red-600">Subtotal</div><div className="w-1/2 p-1 text-right text-black">{subTotal.toLocaleString()}</div></div>
