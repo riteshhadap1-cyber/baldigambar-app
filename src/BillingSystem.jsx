@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   Plus, Trash2, Printer, Save, Settings, FileText, 
-  Search, Share2, Upload, Lock, Minimize, Maximize, FileType
+  Search, Share2, Upload, Lock, Minimize, Maximize, FileType,
+  Filter, CheckCircle, Clock, Download, RefreshCw
 } from 'lucide-react';
 
 // FIREBASE IMPORTS
@@ -23,7 +24,7 @@ export default function BillingSystem({ isAdmin }) {
     tagline: 'जय अंबे बिल्डिंग मटेरियल सप्लायर्स',
     address: 'मु. गणेशगाव - चिंचवली, पो. कडाव, ता. कर्जत, जि. रायगड.',
     mobile: '9923465353', 
-    terms: '', // Removed Jurisdiction Default
+    terms: '', 
     signature: null
   });
 
@@ -46,6 +47,7 @@ export default function BillingSystem({ isAdmin }) {
   const [activeTab, setActiveTab] = useState('create'); 
   const [showStamp, setShowStamp] = useState(true);
   const [paperSize, setPaperSize] = useState('A4');
+  const [historyFilter, setHistoryFilter] = useState('All'); // All, Paid, Pending
   
   // Letterhead State
   const [letterContent, setLetterContent] = useState('');
@@ -77,8 +79,23 @@ export default function BillingSystem({ isAdmin }) {
   }, [activeTab]);
 
   // ==========================================
-  // 3. CALCULATIONS
+  // 3. CALCULATIONS & HELPERS
   // ==========================================
+  const calculateTotal = (inv) => {
+    const items = inv.items || [];
+    const sub = items.reduce((s, i) => s + Number(i.amount), 0);
+    const gst = inv.isGst ? (sub * (inv.gstRate || 18) / 100) : 0;
+    const discount = Number(inv.discount) || 0;
+    return Math.round(Math.max(0, sub + gst - discount));
+  };
+
+  const getBalance = (inv) => {
+    const total = calculateTotal(inv);
+    const paid = Number(inv.advances) || 0;
+    return total - paid;
+  };
+
+  // Current Form Calculations
   const subTotal = formData.items.reduce((sum, item) => sum + Number(item.amount), 0);
   const gstAmount = formData.isGst ? (subTotal * (formData.gstRate / 100)) : 0;
   const totalBeforeDiscount = subTotal + gstAmount;
@@ -103,7 +120,7 @@ export default function BillingSystem({ isAdmin }) {
     return str;
   };
 
-  // Helper: Auto Resize Textarea
+  // Auto Resize Textarea
   const AutoResizeTextarea = ({ value, onChange, placeholder, disabled }) => {
     const textareaRef = useRef(null);
     useEffect(() => {
@@ -189,6 +206,39 @@ export default function BillingSystem({ isAdmin }) {
     });
   };
 
+  const markAsPaid = (inv) => {
+    if (!isAdmin) return;
+    if (!confirm(`Mark Bill #${inv.billNo} as fully PAID?`)) return;
+    
+    const total = calculateTotal(inv);
+    update(ref(db, `invoices/${inv.firebaseId}`), { advances: total });
+  };
+
+  const downloadHistoryCSV = () => {
+    const headers = ["Bill No", "Date", "Client", "Total Amount", "Paid", "Balance", "Status"];
+    
+    const filteredRows = invoices.filter(inv => {
+        const bal = getBalance(inv);
+        if (historyFilter === 'Paid') return bal <= 0;
+        if (historyFilter === 'Pending') return bal > 0;
+        return true;
+    });
+
+    const rows = filteredRows.map(inv => {
+        const total = calculateTotal(inv);
+        const paid = Number(inv.advances) || 0;
+        const bal = total - paid;
+        return [inv.billNo, inv.date, inv.client.name, total, paid, bal, bal <= 0 ? "PAID" : "PENDING"];
+    });
+
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+    const link = document.createElement("a");
+    link.setAttribute("href", encodeURI(csvContent));
+    link.setAttribute("download", `Billing_Report_${historyFilter}_${new Date().toISOString().slice(0,10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+  };
+
   const saveSettings = () => {
     if (!isAdmin) return;
     set(ref(db, 'biz_profile'), bizProfile);
@@ -211,7 +261,7 @@ export default function BillingSystem({ isAdmin }) {
   };
 
   const shareOnWhatsApp = (inv) => {
-    const total = Math.round(inv.items.reduce((s,i)=>s+i.amount,0) + (inv.isGst ? inv.items.reduce((s,i)=>s+i.amount,0)*0.18 : 0) - (inv.discount || 0));
+    const total = calculateTotal(inv);
     const text = `Hello ${inv.client.name},%0A%0AHere is your Invoice *#${inv.billNo}* from ${bizProfile.name}.%0A%0ADate: ${inv.date}%0AAmount: *₹${total.toLocaleString()}*%0A%0APlease pay by due date.%0A%0AThank you!`;
     window.open(`https://wa.me/${inv.client.mobile}?text=${text}`, '_blank');
   };
@@ -228,43 +278,17 @@ export default function BillingSystem({ isAdmin }) {
         input[type=number] { -moz-appearance: textfield; }
         
         @media print {
-          /* 1. HIDE EVERYTHING by default */
           body * { visibility: hidden; }
-          
-          /* 2. SHOW ONLY THE PRINT WRAPPER */
           .print-wrapper, .print-wrapper * { visibility: visible; }
-
-          /* 3. POSITION IT AT THE TOP */
-          .print-wrapper {
-            position: absolute;
-            left: 0;
-            top: 0;
-            width: 100%;
-            margin: 0;
-            padding: 0;
-            background: white;
-            z-index: 9999;
-          }
-
-          /* 4. RESET PAGE PROPERTIES */
-          html, body {
-            height: auto !important;
-            overflow: visible !important;
-            margin: 0 !important;
-            padding: 0 !important;
-          }
-
-          /* 5. TABLE HANDLING */
+          .print-wrapper { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; background: white; z-index: 9999; }
+          html, body { height: auto !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; }
           thead { display: table-header-group; }
           tfoot { display: table-footer-group; }
           tr { page-break-inside: avoid; }
-
-          /* 6. COLORS */
           body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
           .border-red-600 { border-color: #dc2626 !important; }
           .text-red-600 { color: #dc2626 !important; }
           .bg-red-50 { background-color: #fef2f2 !important; }
-          
           .no-print { display: none !important; }
           .print-content-visible { display: block !important; }
           .print-input-hidden { display: none !important; }
@@ -293,7 +317,6 @@ export default function BillingSystem({ isAdmin }) {
       {/* --- SETTINGS TAB --- */}
       {activeTab === 'settings' && isAdmin && (
         <div className="bg-white p-8 rounded-2xl shadow-lg border border-gray-100 max-w-3xl mx-auto animate-fade-in">
-          {/* Settings Fields */}
           <h3 className="text-xl font-black uppercase text-gray-800 mb-6 border-b pb-2">Business Profile</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4">
             <div><label className="text-xs font-bold text-gray-400 uppercase">Company Name</label><input className="w-full border-2 border-gray-100 p-3 rounded-lg font-bold outline-none" value={bizProfile.name} onChange={e => setBizProfile({...bizProfile, name: e.target.value})} /></div>
@@ -320,44 +343,86 @@ export default function BillingSystem({ isAdmin }) {
         </div>
       )}
 
-      {/* --- HISTORY TAB --- */}
+      {/* --- HISTORY TAB (UPDATED: Filters, Mark Paid, Download) --- */}
       {activeTab === 'history' && (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden animate-fade-in">
+          
+          {/* FILTER HEADER */}
+          <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-slate-50">
+             <div className="flex items-center gap-3">
+                <span className="text-sm font-bold text-slate-500 uppercase flex items-center gap-1"><Filter size={16}/> Filter:</span>
+                <select 
+                  className="bg-white border border-gray-300 text-slate-700 font-bold text-sm rounded-lg p-2 outline-none focus:border-orange-500"
+                  value={historyFilter}
+                  onChange={(e) => setHistoryFilter(e.target.value)}
+                >
+                  <option value="All">All Invoices</option>
+                  <option value="Pending">Pending Only</option>
+                  <option value="Paid">Paid Only</option>
+                </select>
+             </div>
+             <button onClick={downloadHistoryCSV} className="bg-green-600 text-white px-4 py-2 rounded-lg font-bold text-sm hover:bg-green-700 flex items-center gap-2">
+               <Download size={16}/> Download List
+             </button>
+          </div>
+
           <table className="w-full text-sm text-left">
             <thead className="bg-white text-gray-500 uppercase font-bold text-xs border-b border-gray-200">
-              <tr><th className="p-4">Bill No</th><th className="p-4">Date</th><th className="p-4">Client</th><th className="p-4 text-right">Amount</th><th className="p-4 text-center">Action</th></tr>
+              <tr><th className="p-4">Bill No</th><th className="p-4">Date</th><th className="p-4">Client</th><th className="p-4 text-right">Amount</th><th className="p-4 text-center">Status</th><th className="p-4 text-center">Action</th></tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {invoices.map(inv => {
-                const total = Math.round(inv.items.reduce((s,i)=>s+i.amount,0) + (inv.isGst ? inv.items.reduce((s,i)=>s+i.amount,0)*0.18 : 0) - (inv.discount||0));
+              {invoices
+                .filter(inv => {
+                   const bal = getBalance(inv);
+                   if (historyFilter === 'Paid') return bal <= 0;
+                   if (historyFilter === 'Pending') return bal > 0;
+                   return true;
+                })
+                .map(inv => {
+                const total = calculateTotal(inv);
+                const balance = getBalance(inv);
+                const isPaid = balance <= 0;
+
                 return (
-                  <tr key={inv.id} className="hover:bg-orange-50 transition-colors">
+                  <tr key={inv.id} className="hover:bg-orange-50 transition-colors group">
                     <td className="p-4 font-bold text-slate-700">#{inv.billNo}</td>
                     <td className="p-4 font-medium text-gray-500">{inv.date}</td>
                     <td className="p-4 font-bold text-gray-800">{inv.client.name}</td>
-                    <td className="p-4 text-right font-black text-emerald-600">₹{total.toLocaleString()}</td>
-                    <td className="p-4 text-center flex justify-center gap-3">
-                      <button onClick={() => {setFormData(inv); setActiveTab('create');}} className="text-orange-600 font-bold hover:underline flex items-center gap-1"><FileText size={16}/> View</button>
-                      <button onClick={() => shareOnWhatsApp(inv)} className="text-green-600 font-bold hover:underline flex items-center gap-1"><Share2 size={16}/> WhatsApp</button>
-                      {isAdmin && <button onClick={() => { if(confirm('Delete?')) remove(ref(db, `invoices/${inv.firebaseId}`)); }} className="text-red-400 hover:text-red-600"><Trash2 size={16}/></button>}
+                    <td className="p-4 text-right font-black text-slate-800">₹{total.toLocaleString()}</td>
+                    <td className="p-4 text-center">
+                        <span className={`px-2 py-1 rounded text-[10px] font-black uppercase flex items-center justify-center gap-1 w-20 mx-auto ${isPaid ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                           {isPaid ? <CheckCircle size={12}/> : <Clock size={12}/>}
+                           {isPaid ? 'PAID' : 'PENDING'}
+                        </span>
+                    </td>
+                    <td className="p-4 text-center flex justify-center gap-2">
+                      {/* Mark Paid Button */}
+                      {!isPaid && isAdmin && (
+                         <button onClick={() => markAsPaid(inv)} className="bg-green-50 text-green-600 p-2 rounded-lg hover:bg-green-100" title="Mark Fully Paid">
+                            <CheckCircle size={16}/>
+                         </button>
+                      )}
+                      
+                      <button onClick={() => {setFormData(inv); setActiveTab('create');}} className="text-orange-600 font-bold hover:bg-orange-50 p-2 rounded-lg" title="Edit / View"><FileText size={16}/></button>
+                      <button onClick={() => shareOnWhatsApp(inv)} className="text-green-600 font-bold hover:bg-green-50 p-2 rounded-lg" title="WhatsApp"><Share2 size={16}/></button>
+                      {isAdmin && <button onClick={() => { if(confirm('Delete?')) remove(ref(db, `invoices/${inv.firebaseId}`)); }} className="text-red-400 hover:bg-red-50 p-2 rounded-lg" title="Delete"><Trash2 size={16}/></button>}
                     </td>
                   </tr>
                 )
               })}
-              {invoices.length === 0 && <tr><td colSpan="5" className="p-8 text-center text-gray-400 italic">No invoices found.</td></tr>}
+              {invoices.length === 0 && <tr><td colSpan="6" className="p-8 text-center text-gray-400 italic">No invoices found.</td></tr>}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* --- LETTERHEAD TAB --- */}
+      {/* --- LETTERHEAD TAB (UNCHANGED) --- */}
       {activeTab === 'letterhead' && (
         <div className="flex justify-center animate-fade-in">
            <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 flex flex-col ${
                 paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px]' : 'w-[210mm] min-h-[297mm] text-sm'
               }`}>
               
-              {/* BRAND HEADER (Reused) */}
               <div className="mb-2">
                 <div className={`flex justify-between items-end font-bold text-red-600 mb-1 ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>
                   <div className="text-left leading-tight"><p>प्रो. महेश हडप</p><p>मो. 9923465353</p></div>
@@ -382,7 +447,6 @@ export default function BillingSystem({ isAdmin }) {
                 </div>
               </div>
 
-              {/* EDITABLE BODY */}
               <div className="flex-1 min-h-[500px]">
                  <textarea 
                     className="w-full h-full resize-none outline-none bg-transparent p-4 font-bold text-black placeholder:text-gray-200" 
@@ -392,7 +456,6 @@ export default function BillingSystem({ isAdmin }) {
                  />
               </div>
 
-              {/* OPTIONAL SIGNATURE AT BOTTOM */}
               <div className="mt-8 pt-8 flex justify-end">
                  <div className="text-center">
                     <p className="text-[10px] font-bold text-red-700">बालदिगंबर इंटरप्राइजेस करिता</p>
@@ -403,11 +466,10 @@ export default function BillingSystem({ isAdmin }) {
         </div>
       )}
 
-      {/* --- CREATE TAB --- */}
+      {/* --- CREATE TAB (UNCHANGED) --- */}
       {activeTab === 'create' && (
         <div className="flex flex-col lg:flex-row gap-6">
           
-          {/* LEFT: INPUTS */}
           <div className="lg:w-1/3 space-y-4 no-print animate-fade-in">
             {isAdmin ? (
               <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
@@ -460,20 +522,15 @@ export default function BillingSystem({ isAdmin }) {
             )}
           </div>
 
-          {/* RIGHT: PREVIEW & PRINT AREA */}
           <div className="lg:w-2/3 bg-slate-100 p-4 lg:p-8 rounded-2xl overflow-auto print:p-0 print:bg-white print:w-full print:rounded-none flex justify-center">
-            
             <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 ${
                 paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px]' : 'w-[210mm] min-h-[297mm] text-sm'
               }`}>
-              
               {showStamp && (
                 balanceDue <= 0 
                   ? <div className="absolute top-[40%] left-[40%] border-4 border-green-600 text-green-600 text-6xl font-black opacity-40 transform -rotate-45 p-4 rounded-xl pointer-events-none z-10">PAID</div>
                   : <div className="absolute top-[40%] left-[35%] border-4 border-red-600 text-red-600 text-6xl font-black opacity-20 transform -rotate-45 p-4 rounded-xl pointer-events-none z-10">UNPAID</div>
               )}
-
-              {/* HEADER */}
               <div className="mb-2">
                 <div className={`flex justify-between items-end font-bold text-red-600 mb-1 ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>
                   <div className="text-left leading-tight"><p>प्रो. महेश हडप</p><p>मो. 9923465353</p></div>
@@ -497,8 +554,6 @@ export default function BillingSystem({ isAdmin }) {
                   <p className={`font-bold text-red-700 ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>{bizProfile.address}</p>
                 </div>
               </div>
-
-              {/* INFO */}
               <div className={`flex justify-between items-center py-2 px-1 text-red-800 font-bold ${paperSize === 'A5' ? 'text-xs' : 'text-lg'}`}>
                 <div className="flex gap-2"><span>बिल नं. :</span><span className="text-black">{formData.billNo}</span></div>
                 <div className="flex gap-2"><span>दिनांक :</span><span className="text-black underline decoration-dotted underline-offset-4">{new Date(formData.date).toLocaleDateString('en-IN')}</span></div>
@@ -507,8 +562,6 @@ export default function BillingSystem({ isAdmin }) {
                  <span>मेसर्स :</span><span className="flex-1 text-black pl-2">{formData.client.name}</span>
                  {formData.client.mobile && <span className="text-sm text-red-600">({formData.client.mobile})</span>}
               </div>
-
-              {/* TABLE */}
               <div className="border-2 border-red-600 rounded-sm">
                 <table className={`w-full border-collapse ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>
                   <thead className="bg-red-50 text-red-700 border-b-2 border-red-600">
@@ -543,8 +596,6 @@ export default function BillingSystem({ isAdmin }) {
                 </table>
               </div>
               {isAdmin && <button onClick={addItem} className="no-print mt-2 mb-2 text-xs font-bold text-white bg-red-600 px-3 py-1 rounded hover:bg-red-800 flex items-center gap-1 w-fit"><Plus size={10}/> Add Item</button>}
-
-              {/* FOOTER */}
               <div className="mt-2 border-2 border-t-0 border-red-600 flex text-red-800 print:break-inside-avoid">
                 <div className="flex-1 p-2 flex flex-col justify-between border-r-2 border-red-600">
                    <div>
@@ -560,12 +611,9 @@ export default function BillingSystem({ isAdmin }) {
                         </div>
                      )}
                    </div>
-                   {/* REMOVED: Jurisdiction text */}
+                   <div className="mt-4 text-[10px] font-bold text-red-500">Subject to Karjat Jurisdiction.</div>
                 </div>
-
                 <div className={`w-1/3 font-bold ${paperSize === 'A5' ? 'text-xs' : 'text-sm'}`}>
-                   
-                   {/* --- VISIBLE GST & DISCOUNT ROWS --- */}
                    { (formData.isGst || formData.discount > 0) && (
                      <>
                         <div className="flex border-b border-red-600"><div className="w-1/2 p-1 border-r border-red-600">Subtotal</div><div className="w-1/2 p-1 text-right text-black">{subTotal.toLocaleString()}</div></div>
@@ -580,18 +628,15 @@ export default function BillingSystem({ isAdmin }) {
                         )}
                      </>
                    )}
-
                    <div className="flex border-b border-red-600"><div className="w-1/2 p-1 border-r border-red-600">एकूण (Total)</div><div className="w-1/2 p-1 text-right text-black">{grandTotal.toLocaleString()}</div></div>
                    <div className="flex border-b border-red-600"><div className="w-1/2 p-1 border-r border-red-600">जमा (Paid)</div><div className="w-1/2 p-1 text-right text-black">{formData.advances}</div></div>
                    <div className="flex border-b border-red-600"><div className="w-1/2 p-1 border-r border-red-600">बाकी (Balance)</div><div className="w-1/2 p-1 text-right text-black">{balanceDue.toLocaleString()}</div></div>
-                   
                    <div className="p-2 text-center mt-2 h-24 flex flex-col justify-end">
                       {bizProfile.signature ? <img src={bizProfile.signature} alt="Sig" className={`mx-auto mb-1 ${paperSize === 'A5' ? 'h-10' : 'h-14'}`} style={{ mixBlendMode: 'multiply' }} /> : <div className="h-10"></div>}
                       <p className="text-[10px]">बालदिगंबर इंटरप्राइजेस करिता</p>
                    </div>
                 </div>
               </div>
-
             </div>
           </div>
         </div>

@@ -3,11 +3,11 @@ import {
   TrendingUp, TrendingDown, Users, Truck, FileText, 
   ArrowRight, AlertTriangle, IndianRupee, Wallet, Clock, 
   CheckCircle, CalendarDays, Download, PieChart, Activity,
-  ChevronLeft, ChevronRight
+  ChevronLeft, ChevronRight, BarChart3, Coins
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
-import { ref, onValue } from 'firebase/database';
+import { ref, onValue, query, limitToLast } from 'firebase/database';
 
 export default function Dashboard({ setActiveTab, isAdmin }) {
   
@@ -19,371 +19,328 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
   const [loading, setLoading] = useState(true);
 
   // Raw Data Storage
-  const [rawInvoices, setRawInvoices] = useState([]);
-  const [rawFleet, setRawFleet] = useState({});
-  const [rawWorkers, setRawWorkers] = useState([]);
-  const [rawAttendance, setRawAttendance] = useState({});
-  const [rawCashbook, setRawCashbook] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [cashbook, setCashbook] = useState([]);
+  const [fleetData, setFleetData] = useState({});
+  const [workers, setWorkers] = useState([]);
 
   useEffect(() => {
-    // 1. INVOICES
-    onValue(ref(db, 'invoices'), (snapshot) => {
+    // 1. INVOICES (Fetch All to calculate Total Pending Dues correctly)
+    const unsubInvoices = onValue(ref(db, 'invoices'), (snapshot) => {
       const data = snapshot.val();
-      setRawInvoices(data ? Object.values(data) : []);
+      setInvoices(data ? Object.values(data) : []);
     });
 
-    // 2. FLEET DATA
-    onValue(ref(db, 'fleet_data'), (snapshot) => {
+    // 2. CASHBOOK (Fetch Last 200 for speed, filter later)
+    const cashbookQuery = query(ref(db, 'cashbook'), limitToLast(200));
+    const unsubCashbook = onValue(cashbookQuery, (snapshot) => {
+      const data = snapshot.val();
+      setCashbook(data ? Object.values(data) : []);
+    });
+
+    // 3. FLEET DATA (For Fuel/Service expenses)
+    const unsubFleet = onValue(ref(db, 'fleet_data'), (snapshot) => {
       const data = snapshot.val() || {};
-      const normalized = {};
-      Object.keys(data).forEach(k => {
-          normalized[k] = {
-              ...data[k],
-              fuelHistory: data[k].fuelHistory ? Object.values(data[k].fuelHistory) : [],
-              advanceHistory: data[k].advanceHistory ? Object.values(data[k].advanceHistory) : []
-          };
-      });
-      setRawFleet(normalized);
+      setFleetData(data);
     });
 
-    // 3. LABOR
-    onValue(ref(db, 'workers'), (snapshot) => {
-      setRawWorkers(snapshot.val() ? Object.values(snapshot.val()) : []);
-    });
-
-    onValue(ref(db, 'attendance'), (snapshot) => {
-      setRawAttendance(snapshot.val() || {});
-    });
-
-    // 4. CASHBOOK
-    onValue(ref(db, 'cashbook'), (snapshot) => {
-      setRawCashbook(snapshot.val() ? Object.values(snapshot.val()) : []);
+    // 4. WORKERS (For count)
+    const unsubWorkers = onValue(ref(db, 'workers'), (snapshot) => {
+      const data = snapshot.val();
+      setWorkers(data ? Object.values(data) : []);
       setLoading(false);
     });
+
+    return () => {
+      unsubInvoices(); unsubCashbook(); unsubFleet(); unsubWorkers();
+    };
   }, []);
 
   // ==========================================
-  // 2. LOGIC & HELPERS
+  // 2. SMART CALCULATIONS (The "Refinement")
   // ==========================================
-
-  const changeMonth = (offset) => {
-    const [y, m] = viewMonth.split('-').map(Number);
-    const date = new Date(y, m - 1 + offset);
-    const newY = date.getFullYear();
-    const newM = String(date.getMonth() + 1).padStart(2, '0');
-    setViewMonth(`${newY}-${newM}`);
-  };
-
-  const formatMonth = (ym) => {
-    if(!ym) return "";
-    const [y, m] = ym.split('-');
-    const date = new Date(y, m - 1);
-    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
-  };
-
-  // ==========================================
-  // 3. CALCULATIONS (MEMOIZED)
-  // ==========================================
-
+  
   const stats = useMemo(() => {
-    // A. INVOICE CALCULATIONS (Monthly)
-    const monthlyInvoices = rawInvoices.filter(inv => inv.date.startsWith(viewMonth));
-    const totalBilled = monthlyInvoices.reduce((sum, inv) => {
-        const sub = (inv.items || []).reduce((s, i) => s + Number(i.amount), 0);
-        const tax = inv.isGst ? sub * 0.18 : 0;
-        return sum + Math.round(sub + tax - (inv.discount || 0));
-    }, 0);
-    const totalReceived = monthlyInvoices.reduce((sum, inv) => sum + Number(inv.advances || 0), 0);
-    const pendingDues = totalBilled - totalReceived;
+    let monthlyInvoiced = 0;   // Total value of bills created this month
+    let monthlyCollected = 0;  // Actual CASH received from bills this month
+    let globalPending = 0;     // Total money stuck in market (All time)
+    
+    let monthlyExpense = 0;    // Cashbook expenses
+    let monthlyOtherIncome = 0;// Cashbook income
 
-    // B. FLEET EXPENSES (Monthly)
-    let fleetFuelCost = 0;
-    let fleetMaintenance = 0;
-    let fleetDriverSalaries = 0;
+    // 1. PROCESS INVOICES
+    invoices.forEach(inv => {
+        // Calculate Grand Total of Invoice
+        const items = inv.items || [];
+        const sub = items.reduce((s, i) => s + Number(i.amount), 0);
+        const gst = inv.isGst ? (sub * (inv.gstRate || 18) / 100) : 0;
+        const discount = Number(inv.discount) || 0;
+        const grandTotal = Math.round(Math.max(0, sub + gst - discount));
+        const received = Number(inv.advances) || 0;
+        const balance = grandTotal - received;
 
-    Object.values(rawFleet).forEach(v => {
-        const monthlyFuel = v.fuelHistory.filter(f => f.date.startsWith(viewMonth));
-        fleetFuelCost += monthlyFuel.reduce((s, f) => s + Number(f.cost), 0);
-        fleetMaintenance += Number(v.service || 0);
-        fleetDriverSalaries += Number(v.salary || 0);
+        // GLOBAL STAT: Outstanding Dues (Money stuck in market)
+        if (balance > 0) {
+            globalPending += balance;
+        }
+
+        // MONTHLY STATS (Only if invoice belongs to selected month)
+        if (inv.date.startsWith(viewMonth)) {
+            monthlyInvoiced += grandTotal;
+            monthlyCollected += received; // <--- FIX: We only count what was PAID
+        }
     });
-    const totalFleetExpense = fleetFuelCost + fleetMaintenance + fleetDriverSalaries;
 
-    // C. LABOR COSTS (Monthly Estimated)
-    let laborCost = 0;
-    let presentToday = 0;
-    const todayStr = new Date().toISOString().split('T')[0];
+    // 2. PROCESS CASHBOOK (Month Filtered)
+    cashbook.forEach(txn => {
+        if (txn.date && txn.date.startsWith(viewMonth)) {
+            if (txn.type === 'Income') monthlyOtherIncome += Number(txn.amount);
+            if (txn.type === 'Expense') monthlyExpense += Number(txn.amount);
+        }
+    });
 
-    rawWorkers.forEach(w => {
-        const todayStatus = (rawAttendance[todayStr] || {})[w.id];
-        if (todayStatus === 'P' || todayStatus === 'HD') presentToday++;
-
-        let daysPresent = 0;
-        let halfDays = 0;
-        
-        Object.keys(rawAttendance).forEach(date => {
-            if (date.startsWith(viewMonth)) {
-                if (rawAttendance[date][w.id] === 'P') daysPresent++;
-                if (rawAttendance[date][w.id] === 'HD') halfDays++;
-            }
+    // 3. PROCESS FLEET EXPENSES (Month Filtered)
+    // We look inside fleet_data history arrays
+    Object.values(fleetData).forEach(vehicle => {
+        // Fuel
+        const fuel = vehicle.fuelHistory ? Object.values(vehicle.fuelHistory) : [];
+        fuel.forEach(f => {
+            if (f.date && f.date.startsWith(viewMonth)) monthlyExpense += Number(f.cost);
         });
-        laborCost += (daysPresent * Number(w.rate)) + (halfDays * (Number(w.rate)/2));
+        // Advances/Salary logic is usually handled in 'cashbook' if you are paying driver, 
+        // but if you track it separately, add it here.
     });
 
-    // D. CASHBOOK (Monthly)
-    const monthlyCashbook = rawCashbook.filter(e => e.date.startsWith(viewMonth));
-    const cashIncome = monthlyCashbook.filter(e => e.type === 'Income').reduce((s, e) => s + Number(e.amount), 0);
-    const cashExpense = monthlyCashbook.filter(e => e.type === 'Expense').reduce((s, e) => s + Number(e.amount), 0);
-
-    // E. NET PROFIT
-    const totalIncome = totalBilled + cashIncome;
-    const totalExpense = totalFleetExpense + laborCost + cashExpense;
-    const netProfit = totalIncome - totalExpense;
+    // 4. FINAL KPI
+    // Actual Income = Cashbook Income + Collected from Invoices
+    const totalActualIncome = monthlyOtherIncome + monthlyCollected; 
+    
+    // Net Profit = Actual Income - Total Expenses
+    const netProfit = totalActualIncome - monthlyExpense;
 
     return {
-        totalBilled,
-        pendingDues,
-        presentWorkers: presentToday,
-        totalWorkers: rawWorkers.length,
-        activeVehicles: Object.keys(rawFleet).length,
-        fleetFuelCost,
-        laborCost,
-        totalIncome,
-        totalExpense,
-        netProfit,
-        recentInvoices: rawInvoices.sort((a,b) => b.id - a.id).slice(0, 5)
+        monthlyInvoiced,
+        monthlyCollected,
+        globalPending,
+        monthlyExpense,
+        totalActualIncome,
+        netProfit
     };
-  }, [rawInvoices, rawFleet, rawWorkers, rawAttendance, rawCashbook, viewMonth]);
+  }, [invoices, cashbook, fleetData, viewMonth]);
 
-  // CASH IN HAND (Lifetime)
-  const cashInHand = useMemo(() => {
-      const inc = rawCashbook.filter(e => e.type === 'Income').reduce((s, e) => s + Number(e.amount), 0);
-      const exp = rawCashbook.filter(e => e.type === 'Expense').reduce((s, e) => s + Number(e.amount), 0);
-      return inc - exp;
-  }, [rawCashbook]);
 
-  const downloadReport = () => {
-      let csv = `BALDIGAMBAR FINANCIAL REPORT - ${formatMonth(viewMonth)}\n\n`;
-      csv += `METRIC,AMOUNT\n`;
-      csv += `Total Invoice Billed,${stats.totalBilled}\n`;
-      csv += `Labor Payroll Cost,${stats.laborCost}\n`;
-      csv += `Fleet Fuel Cost,${stats.fleetFuelCost}\n`;
-      csv += `Total Expenses,${stats.totalExpense}\n`;
-      csv += `NET PROFIT,${stats.netProfit}\n`;
-      
-      const encodedUri = encodeURI("data:text/csv;charset=utf-8," + csv);
-      const link = document.createElement("a");
-      link.setAttribute("href", encodedUri);
-      link.setAttribute("download", `Report_${viewMonth}.csv`);
-      document.body.appendChild(link);
-      link.click();
-  };
+  // Recent Activity Feed (Merge Invoices & Expenses)
+  const recentActivity = useMemo(() => {
+    const combined = [];
+    
+    // Add Invoices
+    invoices.forEach(inv => {
+        if(inv.date.startsWith(viewMonth)) {
+            combined.push({
+                id: inv.id,
+                date: inv.date,
+                title: `Invoice #${inv.billNo}`,
+                subtitle: inv.client?.name,
+                amount: Number(inv.advances) || 0, // Show received amount
+                total: calculateInvTotal(inv),     // Show total bill amount
+                type: 'bill_payment',
+                isPaid: (calculateInvTotal(inv) - (Number(inv.advances)||0)) <= 0
+            });
+        }
+    });
+
+    // Add Expenses
+    cashbook.forEach(txn => {
+        if(txn.date.startsWith(viewMonth)) {
+            combined.push({
+                id: txn.id || Math.random(),
+                date: txn.date,
+                title: txn.category,
+                subtitle: txn.payee || txn.note || '-',
+                amount: Number(txn.amount),
+                type: txn.type === 'Income' ? 'other_income' : 'expense'
+            });
+        }
+    });
+
+    // Sort by date desc
+    return combined.sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
+  }, [invoices, cashbook, viewMonth]);
+
+  // Helper for invoice total
+  function calculateInvTotal(inv) {
+    const items = inv.items || [];
+    const sub = items.reduce((s, i) => s + Number(i.amount), 0);
+    const gst = inv.isGst ? (sub * (inv.gstRate || 18) / 100) : 0;
+    return Math.round(Math.max(0, sub + gst - (Number(inv.discount)||0)));
+  }
 
   // ==========================================
-  // 4. UI RENDER
+  // 3. RENDER UI
   // ==========================================
   return (
     <div className="space-y-6 pb-20 font-sans text-slate-800 animate-fade-in">
       
       {/* HEADER & CONTROLS */}
-      <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-slate-900 text-white p-6 rounded-3xl shadow-xl">
-        <div>
-          <h1 className="text-2xl font-black uppercase tracking-tight">Baldigambar HQ</h1>
-          <div className="flex items-center gap-2 mt-1">
-             <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-             <p className="text-slate-400 text-sm font-bold">System Online • Cloud Active</p>
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-3">
-            {/* NEW CALENDAR NAVIGATOR */}
-            <div className="flex items-center bg-slate-800 rounded-xl p-1 border border-slate-700 shadow-lg">
-                <button onClick={() => changeMonth(-1)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors">
-                    <ChevronLeft size={20} />
-                </button>
-                
-                <div className="relative px-4 py-1 text-center min-w-[160px] group">
-                    <div className="flex flex-col items-center cursor-pointer">
-                        <span className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Viewing Report</span>
-                        <span className="text-sm font-bold text-white uppercase tracking-wider group-hover:text-orange-400 transition-colors">{formatMonth(viewMonth)}</span>
-                    </div>
-                    {/* Hidden input overlay for direct jumping */}
-                    <input 
-                    type="month" 
-                    value={viewMonth} 
-                    onChange={(e) => setViewMonth(e.target.value)} 
-                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                    title="Jump to specific month"
-                    />
-                </div>
-
-                <button onClick={() => changeMonth(1)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors">
-                    <ChevronRight size={20} />
-                </button>
-            </div>
-
-            <button onClick={downloadReport} className="bg-white text-slate-900 p-3 rounded-xl hover:bg-orange-50 transition-colors shadow-lg" title="Download CSV Report">
-                <Download size={20}/>
-            </button>
-        </div>
-      </div>
-
-      {/* KPI GRID */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        
-        {/* Net Profit Card */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group hover:shadow-md transition-all">
-          <div className="flex justify-between items-start">
-            <div>
-              <p className="text-xs font-bold text-slate-400 uppercase">Net Profit ({formatMonth(viewMonth)})</p>
-              <h3 className={`text-3xl font-black mt-1 ${stats.netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>₹{stats.netProfit.toLocaleString()}</h3>
-            </div>
-            <div className={`p-2 rounded-lg group-hover:scale-110 transition-transform ${stats.netProfit >= 0 ? 'bg-emerald-100 text-emerald-600' : 'bg-red-100 text-red-600'}`}>
-                {stats.netProfit >= 0 ? <TrendingUp size={20}/> : <TrendingDown size={20}/>}
-            </div>
-          </div>
-          <div className="mt-3 pt-3 border-t border-slate-100 flex justify-between text-[10px] font-bold">
-             <span className="text-slate-500">Income: ₹{stats.totalIncome.toLocaleString()}</span>
-             <span className="text-red-500">Exp: ₹{stats.totalExpense.toLocaleString()}</span>
-          </div>
-        </div>
-
-        {/* Cash Balance */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group hover:shadow-md transition-all">
-          <div className="flex justify-between items-start">
-            <div>
-              <p className="text-xs font-bold text-slate-400 uppercase">Cash In Hand (Total)</p>
-              <h3 className="text-3xl font-black text-slate-800 mt-1">₹{cashInHand.toLocaleString()}</h3>
-            </div>
-            <div className="bg-blue-100 p-2 rounded-lg text-blue-600 group-hover:scale-110 transition-transform"><Wallet size={20}/></div>
-          </div>
-          <div className="mt-3 pt-3 border-t border-slate-100 text-[10px] font-bold text-slate-500">
-            Available Liquid Cash
-          </div>
-        </div>
-
-        {/* Invoice Stats */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm group hover:shadow-md transition-all">
-          <div className="flex justify-between items-start">
-            <div>
-              <p className="text-xs font-bold text-slate-400 uppercase">Billed ({formatMonth(viewMonth)})</p>
-              <h3 className="text-2xl font-black text-slate-800 mt-1">₹{stats.totalBilled.toLocaleString()}</h3>
-            </div>
-            <div className="bg-orange-100 p-2 rounded-lg text-orange-600 group-hover:scale-110 transition-transform"><FileText size={20}/></div>
-          </div>
-          <div className="mt-3 pt-3 border-t border-slate-100 text-[10px] font-bold text-red-500 flex items-center gap-1">
-             <AlertTriangle size={12}/> Pending Dues: ₹{stats.pendingDues.toLocaleString()}
-          </div>
-        </div>
-
-        {/* Labor Stats */}
-        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm group hover:shadow-md transition-all">
-          <div className="flex justify-between items-start">
-            <div>
-              <p className="text-xs font-bold text-slate-400 uppercase">Labor Cost ({formatMonth(viewMonth)})</p>
-              <h3 className="text-2xl font-black text-slate-800 mt-1">₹{stats.laborCost.toLocaleString()}</h3>
-            </div>
-            <div className="bg-purple-100 p-2 rounded-lg text-purple-600 group-hover:scale-110 transition-transform"><Users size={20}/></div>
-          </div>
-          <div className="mt-3 pt-3 border-t border-slate-100 text-[10px] font-bold text-green-600">
-             {stats.presentWorkers} / {stats.totalWorkers} Present Today
-          </div>
-        </div>
-      </div>
-
-      {/* DETAILED SECTIONS */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
-        {/* Left: Quick Actions */}
-        <div className="lg:col-span-1 space-y-4">
-          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm h-full">
-            <h3 className="font-bold text-slate-700 uppercase text-sm mb-4">Quick Shortcuts</h3>
-            <div className="space-y-3">
-              <button onClick={() => setActiveTab('Billing / Invoice')} className="w-full flex items-center justify-between p-4 bg-slate-50 hover:bg-orange-50 hover:border-orange-200 rounded-xl border border-slate-100 transition-all group">
-                <div className="flex items-center gap-3">
-                  <div className="bg-white p-2 rounded-lg text-orange-600 shadow-sm"><FileText size={20}/></div>
-                  <span className="font-bold text-slate-700 group-hover:text-orange-700">Create New Invoice</span>
-                </div>
-                <ArrowRight size={18} className="text-slate-300 group-hover:text-orange-600"/>
-              </button>
-              
-              <button onClick={() => setActiveTab('Fleet Manager')} className="w-full flex items-center justify-between p-4 bg-slate-50 hover:bg-blue-50 hover:border-blue-200 rounded-xl border border-slate-100 transition-all group">
-                <div className="flex items-center gap-3">
-                  <div className="bg-white p-2 rounded-lg text-blue-600 shadow-sm"><Truck size={20}/></div>
-                  <span className="font-bold text-slate-700 group-hover:text-blue-700">Log Fleet Work</span>
-                </div>
-                <ArrowRight size={18} className="text-slate-300 group-hover:text-blue-600"/>
-              </button>
-
-              <button onClick={() => setActiveTab('Labor & HR')} className="w-full flex items-center justify-between p-4 bg-slate-50 hover:bg-green-50 hover:border-green-200 rounded-xl border border-slate-100 transition-all group">
-                <div className="flex items-center gap-3">
-                  <div className="bg-white p-2 rounded-lg text-green-600 shadow-sm"><Users size={20}/></div>
-                  <span className="font-bold text-slate-700 group-hover:text-green-700">Mark Attendance</span>
-                </div>
-                <ArrowRight size={18} className="text-slate-300 group-hover:text-green-600"/>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Right: Recent Invoices & Expenses Breakdown */}
-        <div className="lg:col-span-2 space-y-6">
+      <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+         <div>
+            <h2 className="text-2xl font-black text-slate-800 uppercase tracking-tight">Business Overview</h2>
+            <p className="text-xs font-bold text-slate-400 uppercase">Financial Health & Updates</p>
+         </div>
+         
+         <div className="flex items-center bg-white rounded-xl p-1 border border-gray-200 shadow-sm">
+            <button onClick={() => {
+                const d = new Date(viewMonth + "-01");
+                d.setMonth(d.getMonth() - 1);
+                setViewMonth(d.toISOString().slice(0,7));
+            }} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800"><ChevronLeft size={20}/></button>
             
-            {/* Monthly Expense Breakdown Card */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
-                <h3 className="font-bold text-slate-700 uppercase text-sm mb-4 flex items-center gap-2"><PieChart size={16}/> Expense Breakdown ({formatMonth(viewMonth)})</h3>
-                <div className="space-y-4">
-                    <div>
-                        <div className="flex justify-between text-xs font-bold mb-1"><span className="text-slate-500">Labor Payroll</span><span>₹{stats.laborCost.toLocaleString()}</span></div>
-                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-purple-500" style={{width: `${(stats.laborCost/stats.totalExpense)*100}%`}}></div></div>
-                    </div>
-                    <div>
-                        <div className="flex justify-between text-xs font-bold mb-1"><span className="text-slate-500">Fleet Fuel & Maint</span><span>₹{stats.fleetFuelCost.toLocaleString()}</span></div>
-                        <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden"><div className="h-full bg-red-500" style={{width: `${(stats.fleetFuelCost/stats.totalExpense)*100}%`}}></div></div>
-                    </div>
-                    <div className="pt-2 border-t border-slate-100 flex justify-between font-black text-sm">
-                        <span>TOTAL MONTHLY EXPENSE</span>
-                        <span className="text-red-600">₹{stats.totalExpense.toLocaleString()}</span>
-                    </div>
-                </div>
+            <div className="px-4 text-center">
+                <span className="text-[10px] text-slate-400 uppercase font-bold block">Period</span>
+                <span className="text-sm font-bold text-slate-700 uppercase">{new Date(viewMonth + "-01").toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
+                <input type="month" value={viewMonth} onChange={e => setViewMonth(e.target.value)} className="absolute opacity-0 w-8 h-8 cursor-pointer"/>
             </div>
 
-            {/* Recent Invoices */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="p-5 border-b border-slate-100 flex justify-between items-center">
-                    <h3 className="font-bold text-slate-700 uppercase text-sm">Recent Invoices</h3>
-                    <button onClick={() => setActiveTab('Billing / Invoice')} className="text-xs font-bold text-orange-600 hover:text-orange-800 transition-colors">View All</button>
-                </div>
-                <div className="divide-y divide-slate-50">
-                    {stats.recentInvoices.map((inv) => {
-                    const total = Math.round((inv.items || []).reduce((s,i)=>s+Number(i.amount),0) + (inv.isGst ? (inv.items || []).reduce((s,i)=>s+Number(i.amount),0)*0.18 : 0) - (inv.discount||0));
-                    const paid = total - (Number(inv.advances) || 0) <= 0;
-                    
-                    return (
-                        <div key={inv.id || Math.random()} className="p-4 flex justify-between items-center hover:bg-slate-50 transition-colors">
-                        <div className="flex items-center gap-4">
-                            <div className="h-10 w-10 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-500 text-xs">#{inv.billNo}</div>
-                            <div>
-                            <p className="font-bold text-slate-800">{inv.client?.name || 'Unknown'}</p>
-                            <p className="text-xs font-bold text-slate-400">{inv.date}</p>
-                            </div>
-                        </div>
-                        <div className="text-right">
-                            <p className="font-black text-slate-800">₹{total.toLocaleString()}</p>
-                            <div className={`flex items-center gap-1 justify-end text-[10px] font-bold uppercase ${paid ? 'text-green-600' : 'text-red-600'}`}>
-                            {paid ? <CheckCircle size={10}/> : <Clock size={10}/>}
-                            {paid ? 'PAID' : 'PENDING'}
-                            </div>
-                        </div>
-                        </div>
-                    )
-                    })}
-                    {stats.recentInvoices.length === 0 && (
-                    <div className="p-8 text-center text-slate-400 text-sm font-bold">No invoices generated yet.</div>
-                    )}
-                </div>
-            </div>
-        </div>
+            <button onClick={() => {
+                const d = new Date(viewMonth + "-01");
+                d.setMonth(d.getMonth() + 1);
+                setViewMonth(d.toISOString().slice(0,7));
+            }} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800"><ChevronRight size={20}/></button>
+         </div>
+      </div>
+
+      {/* --- KPI GRID --- */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          
+          {/* 1. NET PROFIT (CASH IN HAND) */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group">
+              <div className="absolute right-0 top-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity transform group-hover:scale-110 duration-500">
+                  <Wallet size={80} />
+              </div>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Net Cash Profit (Month)</p>
+              <div className="flex items-baseline gap-1">
+                 <h3 className={`text-3xl font-black ${stats.netProfit >= 0 ? 'text-slate-800' : 'text-red-500'}`}>
+                    ₹{stats.netProfit.toLocaleString()}
+                 </h3>
+              </div>
+              <div className="mt-4 flex items-center gap-2 text-xs font-bold bg-slate-50 w-fit px-2 py-1 rounded-lg">
+                  <span className="text-green-600 flex items-center gap-1"><TrendingUp size={12}/> In: ₹{stats.totalActualIncome.toLocaleString()}</span>
+                  <span className="text-slate-300">|</span>
+                  <span className="text-red-500 flex items-center gap-1"><TrendingDown size={12}/> Out: ₹{stats.monthlyExpense.toLocaleString()}</span>
+              </div>
+          </div>
+
+          {/* 2. OUTSTANDING DUES (MARKET MONEY) */}
+          <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg shadow-slate-200 relative overflow-hidden">
+               <div className="absolute right-0 top-0 p-4 opacity-10">
+                  <AlertTriangle size={80} />
+               </div>
+               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Market Pending</p>
+               <h3 className="text-3xl font-black text-orange-400">₹{stats.globalPending.toLocaleString()}</h3>
+               <p className="text-[10px] text-slate-400 mt-2 leading-tight">
+                   *Total amount yet to be received from clients across all time.
+               </p>
+          </div>
+
+          {/* 3. BUSINESS VOLUME (BILLED) */}
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
+               <div className="absolute right-0 top-0 p-4 opacity-5">
+                  <FileText size={80} />
+               </div>
+               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Billed (Month)</p>
+               <h3 className="text-3xl font-black text-slate-800">₹{stats.monthlyInvoiced.toLocaleString()}</h3>
+               
+               {/* RECOVERY BAR */}
+               <div className="mt-4">
+                   <div className="flex justify-between text-[10px] font-bold uppercase mb-1 text-slate-400">
+                       <span>Recovery Rate</span>
+                       <span>{stats.monthlyInvoiced > 0 ? Math.round((stats.monthlyCollected / stats.monthlyInvoiced) * 100) : 0}%</span>
+                   </div>
+                   <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                       <div className="bg-emerald-500 h-full rounded-full transition-all duration-1000" style={{ width: `${stats.monthlyInvoiced > 0 ? (stats.monthlyCollected / stats.monthlyInvoiced) * 100 : 0}%` }}></div>
+                   </div>
+               </div>
+          </div>
+
+           {/* 4. EXPENSE METRICS */}
+           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
+               <div className="absolute right-0 top-0 p-4 opacity-5">
+                  <PieChart size={80} />
+               </div>
+               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Expenses (Month)</p>
+               <h3 className="text-3xl font-black text-red-600">₹{stats.monthlyExpense.toLocaleString()}</h3>
+               <div className="mt-4 text-xs font-bold text-slate-500">
+                   Includes Fuel, Salaries, Material Purchases & Maintenance.
+               </div>
+          </div>
+      </div>
+
+      {/* --- RECENT ACTIVITY & LINKS --- */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* LEFT: RECENT ACTIVITY */}
+          <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-4 border-b border-slate-100 flex justify-between items-center">
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2"><Activity size={18} className="text-orange-500"/> Recent Activity</h3>
+                  <button onClick={() => setActiveTab('Billing / Invoice')} className="text-xs font-bold text-blue-600 hover:underline">View All</button>
+              </div>
+              <div className="divide-y divide-slate-50">
+                  {recentActivity.map(item => (
+                      <div key={item.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                          <div className="flex items-center gap-3">
+                              <div className={`h-10 w-10 rounded-full flex items-center justify-center text-white shadow-sm
+                                  ${item.type === 'bill_payment' ? 'bg-slate-800' : 
+                                    item.type === 'expense' ? 'bg-red-500' : 'bg-emerald-500'}`}>
+                                  {item.type === 'bill_payment' ? <FileText size={18}/> : 
+                                   item.type === 'expense' ? <TrendingDown size={18}/> : <Coins size={18}/>}
+                              </div>
+                              <div>
+                                  <p className="text-sm font-bold text-slate-800">{item.title}</p>
+                                  <p className="text-xs text-slate-400 font-medium">{item.subtitle} • {new Date(item.date).toLocaleDateString()}</p>
+                              </div>
+                          </div>
+                          <div className="text-right">
+                              {/* For Bills: Show Collected Amount. For Expense: Show Amount */}
+                              <p className={`font-black ${item.type === 'expense' ? 'text-red-500' : 'text-emerald-600'}`}>
+                                  {item.type === 'expense' ? '-' : '+'}₹{item.amount.toLocaleString()}
+                              </p>
+                              {item.type === 'bill_payment' && (
+                                  <p className={`text-[9px] font-bold uppercase ${item.isPaid ? 'text-emerald-500' : 'text-orange-500'}`}>
+                                      {item.isPaid ? 'Fully Paid' : `Bill Value: ₹${item.total.toLocaleString()}`}
+                                  </p>
+                              )}
+                          </div>
+                      </div>
+                  ))}
+                  {recentActivity.length === 0 && (
+                      <div className="p-8 text-center text-slate-400 text-sm font-bold">No activity this month.</div>
+                  )}
+              </div>
+          </div>
+
+          {/* RIGHT: QUICK LINKS */}
+          <div className="space-y-4">
+              <div className="bg-gradient-to-br from-orange-500 to-red-600 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
+                  <div className="absolute top-0 right-0 p-4 opacity-20"><Truck size={100}/></div>
+                  <h3 className="text-lg font-black uppercase mb-1">Fleet Status</h3>
+                  <p className="text-sm font-medium opacity-90 mb-4">Manage vehicles & logs</p>
+                  <button onClick={() => setActiveTab('Fleet Manager')} className="bg-white text-orange-600 px-4 py-2 rounded-lg font-bold text-xs uppercase shadow hover:bg-slate-50">Open Fleet</button>
+              </div>
+
+              <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
+                  <h3 className="font-bold text-slate-800 mb-4 flex items-center gap-2"><Users size={18}/> Quick Stats</h3>
+                  <div className="space-y-3">
+                      <div className="flex justify-between text-sm">
+                          <span className="text-slate-500 font-bold">Total Workers</span>
+                          <span className="font-black text-slate-800">{workers.length}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                          <span className="text-slate-500 font-bold">Fleet Vehicles</span>
+                          <span className="font-black text-slate-800">{Object.keys(fleetData).length}</span>
+                      </div>
+                  </div>
+              </div>
+          </div>
 
       </div>
     </div>

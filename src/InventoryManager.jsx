@@ -1,534 +1,314 @@
 import React, { useState, useEffect } from 'react';
 import { 
-  Users, Calendar, Check, X, Clock, Plus, Trash2, 
-  DollarSign, Printer, Search, ChevronRight, ChevronLeft, UserPlus,
-  Gift, AlertCircle, Phone, FileText, MessageCircle, Droplet, Lock,
-  CalendarDays
+  Box, Plus, Minus, Search, AlertTriangle, History, 
+  Trash2, Filter, ArrowUpRight, ArrowDownLeft, Package, 
+  LayoutGrid, List, Edit3, X, RefreshCw
 } from 'lucide-react';
+
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
-import { ref, onValue, push, remove, update, set } from 'firebase/database';
+import { 
+  ref, onValue, push, update, remove, query, limitToLast 
+} from 'firebase/database';
 
-export default function LaborManager({ isAdmin }) { 
+export default function InventoryManager({ isAdmin }) {
   
   // ==========================================
-  // 1. DATABASE & STATE
+  // 1. STATE MANAGEMENT
   // ==========================================
+  const [items, setItems] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [sites, setSites] = useState(['Godown', 'Civil Site A', 'JCB Site', 'Patil Wada']); 
   
-  const [workers, setWorkers] = useState([]);
-  const [attendance, setAttendance] = useState({});
-  const [advances, setAdvances] = useState({});
-  const [bonuses, setBonuses] = useState({});
+  // UI State
+  const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('All');
+  const [viewMode, setViewMode] = useState('grid');
+  
+  // Modals
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showLogModal, setShowLogModal] = useState(false);
+  const [showEditItem, setShowEditItem] = useState(null); // For Direct Stock Correction
+  
+  // Forms
+  const [newItem, setNewItem] = useState({ 
+    name: '', category: 'Material', unit: 'Bags', 
+    qty: 0, minLevel: 10, price: 0 
+  });
 
-  const [selectedWorker, setSelectedWorker] = useState(null);
-  const [activeTab, setActiveTab] = useState('attendance'); 
-  
-  // DATE STATES
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]); // For Daily Marking
-  const [viewMonth, setViewMonth] = useState(new Date().toISOString().slice(0, 7)); // "YYYY-MM" for Payroll/Reports
-  
-  const [newWorker, setNewWorker] = useState({ name: '', role: '', rate: '', phone: '' });
-  const [moneyForm, setMoneyForm] = useState({ amount: '', reason: '', type: 'ADVANCE' }); 
-  const [inkSaver, setInkSaver] = useState(true);
+  const [stockAction, setStockAction] = useState({ 
+    item: null, type: 'OUT', qty: '', reason: '' 
+  });
 
   // ==========================================
-  // 2. LIVE CLOUD CONNECTION
+  // 2. FIREBASE CONNECTION
   // ==========================================
-  
   useEffect(() => {
-    onValue(ref(db, 'workers'), (snapshot) => {
+    // 1. Items
+    const unsubItems = onValue(ref(db, 'inventory_items'), (snapshot) => {
       const data = snapshot.val();
-      const loaded = data ? Object.keys(data).map(key => ({ firebaseId: key, ...data[key] })) : [];
-      setWorkers(loaded);
+      setItems(data ? Object.keys(data).map(k => ({ id: k, ...data[k] })) : []);
     });
 
-    onValue(ref(db, 'attendance'), (snapshot) => {
-      setAttendance(snapshot.val() || {});
+    // 2. Logs (Last 100)
+    const logsQuery = query(ref(db, 'inventory_logs'), limitToLast(100));
+    const unsubLogs = onValue(logsQuery, (snapshot) => {
+      const data = snapshot.val();
+      const loadedLogs = data ? Object.keys(data).map(k => ({ id: k, ...data[k] })) : [];
+      loadedLogs.sort((a,b) => new Date(b.date) - new Date(a.date));
+      setLogs(loadedLogs);
     });
 
-    onValue(ref(db, 'labor_advances'), (snapshot) => {
-      setAdvances(snapshot.val() || {});
+    // 3. Sites
+    const unsubSites = onValue(ref(db, 'sites'), (snapshot) => {
+      if(snapshot.exists()) setSites(snapshot.val());
     });
-    
-    onValue(ref(db, 'labor_bonuses'), (snapshot) => {
-      setBonuses(snapshot.val() || {});
-    });
+
+    return () => { unsubItems(); unsubLogs(); unsubSites(); };
   }, []);
 
   // ==========================================
-  // 3. LOGIC & CALCULATIONS (MONTHLY FILTERED)
+  // 3. ACTIONS
   // ==========================================
+  
+  const filteredItems = items.filter(item => {
+    const matchSearch = item.name.toLowerCase().includes(search.toLowerCase());
+    const matchCat = categoryFilter === 'All' || item.category === categoryFilter;
+    return matchSearch && matchCat;
+  });
 
-  const markAttendance = (workerId, status) => {
-    if (!isAdmin) return;
-    update(ref(db, `attendance/${selectedDate}`), { [workerId]: status });
+  const lowStockCount = items.filter(i => i.qty <= i.minLevel).length;
+  const totalStockValue = items.reduce((sum, i) => sum + (i.qty * i.price), 0);
+  const categories = ['All', 'Material', 'Tools', 'Safety', 'Fuel/Oil', 'Spare Parts'];
+
+  const handleAddItem = () => {
+    if(!isAdmin) return;
+    if(!newItem.name) return alert("Item Name is required");
+    push(ref(db, 'inventory_items'), { ...newItem, qty: Number(newItem.qty), minLevel: Number(newItem.minLevel), price: Number(newItem.price), lastUpdated: new Date().toISOString() });
+    setNewItem({ name: '', category: 'Material', unit: 'Bags', qty: 0, minLevel: 10, price: 0 });
+    setShowAddModal(false);
   };
 
-  const changeDate = (days) => {
-    const d = new Date(selectedDate);
-    d.setDate(d.getDate() + days);
-    setSelectedDate(d.toISOString().split('T')[0]);
+  const handleDeleteItem = (id) => {
+    if(!isAdmin) return;
+    if(confirm("Delete this item permanently?")) remove(ref(db, `inventory_items/${id}`));
   };
 
-  const addWorker = (e) => {
+  // --- NEW: DIRECT EDIT (CORRECTION) ---
+  const handleDirectEdit = (item) => {
+    if(!isAdmin) return;
+    const newQty = prompt(`CORRECTION MODE:\nEnter correct actual stock for ${item.name}:`, item.qty);
+    if(newQty !== null && !isNaN(newQty)) {
+        update(ref(db, `inventory_items/${item.id}`), { qty: Number(newQty) });
+        // Optional: Log the correction
+        push(ref(db, 'inventory_logs'), {
+            date: new Date().toISOString(),
+            itemName: item.name,
+            type: 'CORRECT',
+            qty: Number(newQty),
+            reason: 'Manual Correction',
+            user: 'Admin'
+        });
+    }
+  };
+
+  // --- NEW: DELETE LOG ---
+  const handleDeleteLog = (id) => {
+    if(!isAdmin) return;
+    if(confirm("Remove this log entry? (Note: This does NOT revert the stock count, only the history record).")) {
+        remove(ref(db, `inventory_logs/${id}`));
+    }
+  };
+
+  // --- NEW: CLEAR ALL HISTORY ---
+  const handleClearHistory = () => {
+    if(!isAdmin) return;
+    if(confirm("⚠️ DANGER: This will wipe ALL transaction history logs permanently. Proceed?")) {
+        remove(ref(db, 'inventory_logs'));
+    }
+  };
+
+  // Stock In/Out Logic
+  const openStockAction = (item, type) => {
+    setStockAction({ item, type, qty: '', reason: type === 'OUT' ? sites[0] : 'Purchase' });
+  };
+
+  const submitStockAction = (e) => {
     e.preventDefault();
-    if (!isAdmin) return;
-    if (!newWorker.name || !newWorker.rate) return;
-    
-    const cleanName = newWorker.name.replace(/\b\w/g, l => l.toUpperCase());
-    const cleanRole = newWorker.role.replace(/\b\w/g, l => l.toUpperCase()) || 'Helper';
-    
-    const workerData = { 
-      ...newWorker, 
-      id: Date.now(),
-      name: cleanName, 
-      role: cleanRole 
-    };
+    if(!isAdmin) return;
+    const { item, type, qty, reason } = stockAction;
+    const quantity = Number(qty);
+    if(quantity <= 0) return alert("Enter valid quantity");
 
-    push(ref(db, 'workers'), workerData);
-    setNewWorker({ name: '', role: '', rate: '', phone: '' });
-  };
+    const newQty = type === 'IN' ? item.qty + quantity : item.qty - quantity;
+    if(newQty < 0) return alert("Not enough stock!");
 
-  const removeWorker = (firebaseId, id) => {
-    if (!isAdmin) return;
-    if (confirm("Remove this worker permanently?")) {
-      remove(ref(db, `workers/${firebaseId}`));
-      if (selectedWorker?.id === id) setSelectedWorker(null);
-    }
-  };
-
-  const addMoneyEntry = (e) => {
-    e.preventDefault();
-    if (!isAdmin) return;
-    if (!selectedWorker || !moneyForm.amount) return;
-    
-    const newEntry = { 
-      id: Date.now(), 
-      date: new Date().toISOString().split('T')[0], 
-      amount: Number(moneyForm.amount), 
-      reason: moneyForm.reason 
-    };
-
-    if (moneyForm.type === 'ADVANCE') {
-      push(ref(db, `labor_advances/${selectedWorker.id}`), newEntry);
-    } else {
-      push(ref(db, `labor_bonuses/${selectedWorker.id}`), newEntry);
-    }
-    setMoneyForm({ amount: '', reason: '', type: 'ADVANCE' });
-  };
-
-  const deleteMoneyEntry = (workerId, firebaseKey, type) => {
-    if (!isAdmin) return;
-    if(!confirm("Delete this entry?")) return;
-    
-    if (type === 'ADVANCE') {
-      remove(ref(db, `labor_advances/${workerId}/${firebaseKey}`));
-    } else {
-      remove(ref(db, `labor_bonuses/${workerId}/${firebaseKey}`));
-    }
-  };
-
-  // --- CORE STATS LOGIC (FILTERED BY MONTH) ---
-  const getWorkerStats = (id) => {
-    let present = 0, half = 0, absent = 0;
-    
-    // 1. Calculate Attendance ONLY for selected viewMonth
-    // We iterate through all dates in DB, but only count if they match "YYYY-MM"
-    Object.keys(attendance).forEach(date => {
-      if (date.startsWith(viewMonth)) { // <--- MONTH FILTER
-        const dayStatus = attendance[date][id];
-        if (dayStatus === 'P') present++;
-        if (dayStatus === 'HD') half++;
-        if (dayStatus === 'A') absent++;
-      }
-    });
-    
-    const worker = workers.find(w => w.id === id);
-    // If worker deleted or not found
-    if (!worker) return { present:0, half:0, absent:0, earned:0, totalAdvance:0, totalBonus:0, payable:0, monthLog: [] };
-
-    const earned = (present * worker.rate) + (half * (worker.rate / 2));
-    
-    // 2. Filter Advances by Month
-    const allAdvances = advances[id] ? Object.values(advances[id]) : [];
-    const monthlyAdvances = allAdvances.filter(a => a.date.startsWith(viewMonth)); // <--- MONTH FILTER
-    const totalAdvance = monthlyAdvances.reduce((sum, a) => sum + Number(a.amount), 0);
-
-    // 3. Filter Bonuses by Month
-    const allBonuses = bonuses[id] ? Object.values(bonuses[id]) : [];
-    const monthlyBonuses = allBonuses.filter(b => b.date.startsWith(viewMonth)); // <--- MONTH FILTER
-    const totalBonus = monthlyBonuses.reduce((sum, b) => sum + Number(b.amount), 0);
-    
-    const payable = earned + totalBonus - totalAdvance;
-
-    // 4. Generate Monthly Grid Data (For Print Slip)
-    const daysInMonth = new Date(viewMonth.split('-')[0], viewMonth.split('-')[1], 0).getDate();
-    const monthLog = [];
-    for(let i=1; i<=daysInMonth; i++) {
-        const dayStr = `${viewMonth}-${String(i).padStart(2, '0')}`;
-        const status = (attendance[dayStr] || {})[id] || '-';
-        monthLog.push({ day: i, status });
-    }
-
-    return { present, half, absent, earned, totalAdvance, totalBonus, payable, monthLog, monthlyAdvances, monthlyBonuses };
-  };
-
-  const dailyCost = workers.reduce((sum, w) => {
-    const status = (attendance[selectedDate] || {})[w.id];
-    if (status === 'P') return sum + Number(w.rate);
-    if (status === 'HD') return sum + (Number(w.rate) / 2);
-    return sum;
-  }, 0);
-
-  // Helper to format YYYY-MM to readable
-  const formatMonth = (ym) => {
-    const [y, m] = ym.split('-');
-    const date = new Date(y, m - 1);
-    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
+    update(ref(db, `inventory_items/${item.id}`), { qty: newQty, lastUpdated: new Date().toISOString() });
+    push(ref(db, 'inventory_logs'), { date: new Date().toISOString(), itemId: item.id, itemName: item.name, type: type, qty: quantity, reason: reason, user: 'Admin' });
+    setStockAction({ item: null, type: 'OUT', qty: '', reason: '' });
   };
 
   // ==========================================
-  // 4. UI RENDER
+  // 4. RENDER UI
   // ==========================================
   return (
-    <div className={`space-y-6 pb-20 font-sans text-slate-800 animate-fade-in ${inkSaver ? 'print-ink-saver' : ''}`}>
+    <div className="space-y-6 pb-20 font-sans text-slate-800 animate-fade-in">
       
-      {/* --- STEALTH & INK SAVER CSS --- */}
-      <style>{`
-        @media print {
-          aside, nav, header, .no-print { display: none !important; }
-          main { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; }
-          body { background: white !important; -webkit-print-color-adjust: exact; }
-          .print-area { display: block !important; padding: 0 !important; width: 100%; }
-          
-          .print-ink-saver * {
-            color: black !important;
-            background: transparent !important;
-            border-color: black !important;
-            box-shadow: none !important;
-          }
-          .print-ink-saver .bg-black { background: white !important; border: 1px solid black !important; }
-          .print-ink-saver .text-white { color: black !important; }
-          
-          table { border-collapse: collapse; width: 100%; }
-          th, td { border: 1px solid black; padding: 4px; text-align: left; font-size: 12px; }
-        }
-      `}</style>
-
-      {/* HEADER & TABS */}
-      <div className="flex flex-col md:flex-row justify-between items-center gap-4 no-print">
-        <div className="flex gap-2 bg-white p-1 rounded-xl border border-gray-200 shadow-sm">
-          <button onClick={() => setActiveTab('attendance')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'attendance' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Daily Muster</button>
-          <button onClick={() => setActiveTab('payroll')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'payroll' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Monthly Payroll</button>
-          <button onClick={() => setActiveTab('workers')} className={`px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'workers' ? 'bg-orange-600 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Manage Workers</button>
+      {/* ADD ITEM MODAL */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6">
+            <h3 className="font-black text-xl mb-4 uppercase text-slate-800">Add New Item</h3>
+            <div className="space-y-3">
+              <input placeholder="Item Name" className="w-full border p-2 rounded-lg font-bold" value={newItem.name} onChange={e => setNewItem({...newItem, name: e.target.value})} />
+              <div className="grid grid-cols-2 gap-3">
+                <select className="border p-2 rounded-lg font-bold" value={newItem.category} onChange={e => setNewItem({...newItem, category: e.target.value})}>{categories.filter(c => c !== 'All').map(c => <option key={c}>{c}</option>)}</select>
+                <input placeholder="Unit (e.g. Bags)" className="border p-2 rounded-lg font-bold" value={newItem.unit} onChange={e => setNewItem({...newItem, unit: e.target.value})} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <input type="number" placeholder="Opening Stock" className="border p-2 rounded-lg font-bold" value={newItem.qty} onChange={e => setNewItem({...newItem, qty: e.target.value})} />
+                <input type="number" placeholder="Alert Level" className="border p-2 rounded-lg font-bold text-red-500" value={newItem.minLevel} onChange={e => setNewItem({...newItem, minLevel: e.target.value})} />
+              </div>
+              <input type="number" placeholder="Price (₹)" className="w-full border p-2 rounded-lg font-bold" value={newItem.price} onChange={e => setNewItem({...newItem, price: e.target.value})} />
+              <div className="flex gap-2 mt-4"><button onClick={() => setShowAddModal(false)} className="flex-1 bg-slate-100 py-3 rounded-xl font-bold">Cancel</button><button onClick={handleAddItem} className="flex-1 bg-slate-900 text-white py-3 rounded-xl font-bold">Save</button></div>
+            </div>
+          </div>
         </div>
-        
-        <div className="flex items-center gap-2">
-          {activeTab === 'attendance' && (
-            <div className="flex items-center gap-2 bg-white p-1 pr-1 rounded-xl border border-gray-200">
-              <button onClick={() => changeDate(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500"><ChevronLeft size={20}/></button>
-              <input type="date" className="border-none bg-transparent font-bold text-slate-700 outline-none p-2 text-sm" value={selectedDate} onChange={e => setSelectedDate(e.target.value)} />
-              <button onClick={() => changeDate(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-500"><ChevronRight size={20}/></button>
+      )}
+
+      {/* STOCK IN/OUT MODAL */}
+      {stockAction.item && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+          <form onSubmit={submitStockAction} className="bg-white rounded-2xl w-full max-w-sm shadow-2xl overflow-hidden">
+            <div className={`p-4 text-white flex justify-between items-center ${stockAction.type === 'IN' ? 'bg-green-600' : 'bg-red-600'}`}>
+               <h3 className="font-black text-lg uppercase flex items-center gap-2">{stockAction.type === 'IN' ? <ArrowDownLeft/> : <ArrowUpRight/>} {stockAction.type === 'IN' ? 'Add Stock' : 'Issue Stock'}</h3>
+               <button type="button" onClick={() => setStockAction({ ...stockAction, item: null })}><X size={24}/></button>
             </div>
-          )}
-          {activeTab === 'payroll' && (
-            <div className="flex items-center gap-2 bg-white p-2 rounded-xl border border-gray-200 shadow-sm">
-                <CalendarDays size={18} className="text-orange-600"/>
-                <span className="text-xs font-bold text-gray-400 uppercase">Payroll Month:</span>
-                <input type="month" value={viewMonth} onChange={(e) => setViewMonth(e.target.value)} className="font-bold text-slate-800 outline-none text-sm bg-transparent"/>
+            <div className="p-6 space-y-4">
+               <div className="text-center"><h2 className="text-2xl font-black">{stockAction.item.name}</h2><p className="font-bold text-slate-500">Current: {stockAction.item.qty} {stockAction.item.unit}</p></div>
+               <div className="flex items-center gap-2 bg-slate-100 p-2 rounded-xl"><input autoFocus type="number" placeholder="Qty" className="flex-1 bg-transparent text-xl font-black text-center outline-none" value={stockAction.qty} onChange={e => setStockAction({...stockAction, qty: e.target.value})} /><span className="font-bold text-slate-400 pr-4">{stockAction.item.unit}</span></div>
+               <div>
+                 <label className="text-xs font-bold text-slate-400 uppercase block mb-1">{stockAction.type === 'IN' ? 'Supplier' : 'Site / Destination'}</label>
+                 {stockAction.type === 'OUT' ? <select className="w-full border p-2 rounded-lg font-bold" value={stockAction.reason} onChange={e => setStockAction({...stockAction, reason: e.target.value})}>{sites.map(s => <option key={s}>{s}</option>)}</select> : <input className="w-full border p-2 rounded-lg font-bold" placeholder="Reason/Supplier" value={stockAction.reason} onChange={e => setStockAction({...stockAction, reason: e.target.value})} />}
+               </div>
+               <button className={`w-full py-3 rounded-xl font-bold text-white shadow-lg ${stockAction.type === 'IN' ? 'bg-green-600' : 'bg-red-600'}`}>Confirm</button>
             </div>
-          )}
-          
-          <button onClick={() => setInkSaver(!inkSaver)} className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-bold transition-all border border-gray-200 ${inkSaver ? 'bg-green-100 text-green-700' : 'bg-white text-slate-500'}`}>
-             <Droplet size={16} /> {inkSaver ? 'Ink Saver ON' : 'Ink Saver OFF'}
-          </button>
+          </form>
+        </div>
+      )}
+
+      {/* --- HEADER --- */}
+      <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+        <div>
+           <h2 className="text-2xl font-black text-slate-800 uppercase tracking-tight flex items-center gap-2"><Package className="text-orange-500"/> Inventory</h2>
+           <p className="text-xs font-bold text-slate-400 uppercase">Stock & Material Management</p>
+        </div>
+        <div className="flex gap-2">
+           <button onClick={() => setShowLogModal(!showLogModal)} className={`p-2 rounded-xl border ${showLogModal ? 'bg-slate-800 text-white' : 'bg-white text-slate-500'}`} title="History Logs"><History size={20}/></button>
+           <button onClick={() => setViewMode(viewMode==='grid'?'list':'grid')} className="p-2 rounded-xl bg-white border border-slate-200 text-slate-500" title="Toggle View">{viewMode === 'grid' ? <List size={20}/> : <LayoutGrid size={20}/>}</button>
+           {isAdmin && <button onClick={() => setShowAddModal(true)} className="bg-slate-900 text-white px-4 py-2 rounded-xl font-bold shadow-lg hover:bg-black flex items-center gap-2"><Plus size={18}/> <span className="hidden sm:inline">Add Item</span></button>}
         </div>
       </div>
 
-      {/* --- TAB 1: DAILY ATTENDANCE (UNCHANGED LOGIC) --- */}
-      {activeTab === 'attendance' && (
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden animate-fade-in">
-          <div className="p-4 bg-slate-50 border-b border-gray-200 flex justify-between items-center print:bg-white print:border-black">
-            <div className="flex items-center gap-2">
-               <h3 className="font-bold text-slate-700 uppercase text-sm print:text-black">Daily Muster: {new Date(selectedDate).toLocaleDateString()}</h3>
-               <span className="bg-slate-200 text-slate-600 text-[10px] font-bold px-2 py-1 rounded-full uppercase print:border print:border-black print:text-black">Today's Cost: ₹{dailyCost.toLocaleString()}</span>
-            </div>
-            <button onClick={() => window.print()} className="text-xs font-bold flex items-center gap-1 text-slate-500 hover:text-black no-print"><Printer size={14}/> Print List</button>
-          </div>
-          
-          <div className="divide-y divide-gray-100 print:divide-black">
-            <div className="hidden print:flex bg-gray-100 p-2 font-bold text-xs uppercase border-b border-black">
-               <div className="w-1/2">Worker Name</div>
-               <div className="w-1/4 text-center">Status</div>
-               <div className="w-1/4 text-right">Remarks</div>
-            </div>
+      {/* --- STATS BAR --- */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm"><p className="text-[10px] font-bold text-slate-400 uppercase">Total Value</p><h3 className="text-xl font-black text-slate-800">₹{totalStockValue.toLocaleString()}</h3></div>
+         <div className={`p-4 rounded-xl border shadow-sm ${lowStockCount > 0 ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'}`}><p className={`text-[10px] font-bold uppercase ${lowStockCount > 0 ? 'text-red-400' : 'text-slate-400'}`}>Low Stock Alerts</p><h3 className={`text-xl font-black ${lowStockCount > 0 ? 'text-red-600' : 'text-slate-800'}`}>{lowStockCount} Items</h3></div>
+         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm col-span-2 flex items-center gap-2">
+            <Search className="text-slate-400" size={20}/>
+            <input placeholder="Search items..." className="w-full outline-none font-bold text-slate-700 bg-transparent" value={search} onChange={e => setSearch(e.target.value)} />
+            <select className="bg-slate-100 text-xs font-bold p-2 rounded-lg outline-none" value={categoryFilter} onChange={e => setCategoryFilter(e.target.value)}>{categories.map(c => <option key={c}>{c}</option>)}</select>
+         </div>
+      </div>
 
-            {workers.map(w => {
-              const status = (attendance[selectedDate] || {})[w.id];
-              return (
-                <div key={w.id} className="p-4 flex flex-col md:flex-row items-center justify-between hover:bg-slate-50 gap-4 print:flex-row print:p-2 print:border-b print:border-black">
-                  <div className="flex items-center gap-4 w-full md:w-auto">
-                    <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center font-bold text-slate-600 text-lg border border-slate-200 print:hidden">{w.name.charAt(0)}</div>
-                    <div>
-                      <div className="font-bold text-slate-800 text-lg">{w.name}</div>
-                      <div className="text-xs font-bold text-slate-400 uppercase flex items-center gap-2 print:text-black">
-                        <span>{w.role} • ₹{w.rate}/day</span>
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex gap-2 w-full md:w-auto justify-end print:hidden">
-                    {isAdmin ? (
-                        <>
-                            <button onClick={() => markAttendance(w.id, 'P')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'P' ? 'bg-green-600 border-green-600 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-green-400 hover:text-green-400'}`}>P</button>
-                            <button onClick={() => markAttendance(w.id, 'HD')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'HD' ? 'bg-yellow-500 border-yellow-500 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-yellow-400 hover:text-yellow-400'}`}>H</button>
-                            <button onClick={() => markAttendance(w.id, 'A')} className={`h-12 w-12 rounded-xl flex items-center justify-center font-bold text-lg border-2 transition-all ${status === 'A' ? 'bg-red-500 border-red-500 text-white shadow-lg' : 'border-slate-200 text-slate-300 hover:border-red-400 hover:text-red-400'}`}>A</button>
-                        </>
-                    ) : (
-                        <div className={`px-4 py-2 rounded-lg font-bold text-sm ${status === 'P' ? 'bg-green-100 text-green-700' : status === 'HD' ? 'bg-yellow-100 text-yellow-700' : status === 'A' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-400'}`}>
-                            {status === 'P' ? 'PRESENT' : status === 'HD' ? 'HALF DAY' : status === 'A' ? 'ABSENT' : 'NOT MARKED'}
+      {/* --- LOGS DRAWER (WITH DELETE) --- */}
+      {showLogModal && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-fade-in">
+           <div className="p-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+              <h4 className="font-bold text-xs uppercase text-slate-500">History Log</h4>
+              <div className="flex gap-2">
+                 {isAdmin && <button onClick={handleClearHistory} className="text-[10px] font-bold bg-red-100 text-red-600 px-2 py-1 rounded hover:bg-red-200">Clear History</button>}
+                 <button onClick={() => setShowLogModal(false)}><X className="text-slate-400" size={16}/></button>
+              </div>
+           </div>
+           <div className="max-h-60 overflow-y-auto">
+              <table className="w-full text-xs text-left">
+                 <thead className="bg-white text-slate-400 font-bold sticky top-0">
+                    <tr><th className="p-3">Date</th><th className="p-3">Item</th><th className="p-3">Type</th><th className="p-3">Reason</th><th className="p-3 text-center">Act</th></tr>
+                 </thead>
+                 <tbody className="divide-y divide-slate-50">
+                    {logs.map(log => (
+                       <tr key={log.id} className="group hover:bg-slate-50">
+                          <td className="p-3 text-slate-500 font-bold">{new Date(log.date).toLocaleDateString()}</td>
+                          <td className="p-3 font-bold text-slate-800">{log.itemName} <span className="text-slate-400 font-normal">({log.qty})</span></td>
+                          <td className="p-3"><span className={`px-2 py-0.5 rounded text-[10px] font-black ${log.type === 'IN' ? 'bg-green-100 text-green-700' : log.type === 'CORRECT' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>{log.type}</span></td>
+                          <td className="p-3 font-bold text-slate-600">{log.reason}</td>
+                          <td className="p-3 text-center">{isAdmin && <button onClick={()=>handleDeleteLog(log.id)} className="text-slate-300 hover:text-red-500"><Trash2 size={12}/></button>}</td>
+                       </tr>
+                    ))}
+                 </tbody>
+              </table>
+           </div>
+        </div>
+      )}
+
+      {/* --- INVENTORY GRID --- */}
+      {viewMode === 'grid' ? (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {filteredItems.map(item => {
+            const isLow = item.qty <= item.minLevel;
+            return (
+              <div key={item.id} className={`bg-white rounded-2xl p-5 border-2 shadow-sm transition-all hover:shadow-md relative group ${isLow ? 'border-red-100' : 'border-slate-100'}`}>
+                 {isLow && <div className="absolute top-0 right-0 bg-red-500 text-white text-[10px] font-bold px-2 py-1 rounded-bl-xl rounded-tr-xl flex items-center gap-1"><AlertTriangle size={10}/> Low</div>}
+                 
+                 <div className="flex justify-between items-start mb-2">
+                    <div><span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{item.category}</span><h3 className="font-black text-lg text-slate-800 leading-tight">{item.name}</h3></div>
+                    {isAdmin && (
+                        <div className="flex gap-1">
+                            <button onClick={() => handleDirectEdit(item)} className="text-slate-200 hover:text-blue-500" title="Correction"><Edit3 size={16}/></button>
+                            <button onClick={() => handleDeleteItem(item.id)} className="text-slate-200 hover:text-red-400" title="Delete"><Trash2 size={16}/></button>
                         </div>
                     )}
-                  </div>
-                  <div className="hidden print:block font-bold">
-                     {status === 'P' ? 'PRESENT' : status === 'HD' ? 'HALF DAY' : status === 'A' ? 'ABSENT' : '-'}
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
+                 </div>
 
-      {/* --- TAB 2: MONTHLY PAYROLL --- */}
-      {activeTab === 'payroll' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
-          
-          {/* Worker List Sidebar */}
-          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden lg:col-span-1 h-fit">
-            <div className="p-4 border-b border-gray-200 font-bold text-slate-700 bg-slate-50 flex justify-between">
-                <span>Select Worker</span>
-                <span className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded uppercase">{viewMonth}</span>
-            </div>
-            <div className="divide-y divide-gray-100 max-h-[600px] overflow-y-auto">
-              {workers.map(w => {
-                const stats = getWorkerStats(w.id);
-                return (
-                  <div key={w.id} onClick={() => setSelectedWorker(w)} className={`p-4 cursor-pointer hover:bg-orange-50 transition-colors ${selectedWorker?.id === w.id ? 'bg-orange-50 border-l-4 border-l-orange-500' : ''}`}>
-                    <div className="flex justify-between items-center">
-                      <div className="font-bold text-slate-800">{w.name}</div>
-                      <div className={`text-xs font-black px-2 py-1 rounded ${stats.payable < 0 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-600'}`}>
-                        {stats.payable < 0 ? `Owes ₹${Math.abs(stats.payable)}` : `Pay ₹${stats.payable}`}
-                      </div>
-                    </div>
-                    <div className="flex gap-3 mt-2 text-[10px] uppercase font-bold text-slate-400">
-                      <span>P: {stats.present}</span>
-                      <span>H: {stats.half}</span>
-                      <span className="text-red-400">Adv: -₹{stats.totalAdvance}</span>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
+                 <div className="flex items-baseline gap-1 my-3">
+                    <span className={`text-3xl font-black ${item.qty === 0 ? 'text-slate-300' : 'text-slate-800'}`}>{item.qty}</span>
+                    <span className="text-xs font-bold text-slate-400 uppercase">{item.unit}</span>
+                 </div>
 
-          {/* Details Panel */}
-          <div className="lg:col-span-2 space-y-6">
-            {selectedWorker ? (
-              <>
-                <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-lg relative overflow-hidden">
-                  <div className="flex justify-between items-start relative z-10">
-                    <div>
-                      <h2 className="text-3xl font-black">{selectedWorker.name}</h2>
-                      <p className="text-slate-400 font-bold text-sm uppercase">{selectedWorker.role} • {formatMonth(viewMonth)}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs font-bold text-slate-400 uppercase">Net Payable ({formatMonth(viewMonth)})</p>
-                      <p className={`text-5xl font-black ${getWorkerStats(selectedWorker.id).payable < 0 ? 'text-red-400' : 'text-green-400'}`}>
-                        ₹{getWorkerStats(selectedWorker.id).payable.toLocaleString()}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-4 mt-8 relative z-10">
-                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
-                      <div className="text-[10px] text-slate-400 uppercase font-bold">Month Earnings</div>
-                      <div className="text-2xl font-bold">₹{getWorkerStats(selectedWorker.id).earned.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-slate-800 p-3 rounded-xl border border-slate-700">
-                      <div className="text-[10px] text-slate-400 uppercase font-bold">Month Advance</div>
-                      <div className="text-2xl font-bold text-red-400">-₹{getWorkerStats(selectedWorker.id).totalAdvance.toLocaleString()}</div>
-                    </div>
-                    <button onClick={() => window.print()} className="bg-white text-slate-900 p-3 rounded-xl font-bold flex flex-col items-center justify-center hover:bg-gray-100 transition-colors">
-                      <Printer size={20}/>
-                      <span className="text-[10px] uppercase mt-1">Print Slip</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Add Money (Advances/Bonuses) */}
-                <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
-                  <div className="flex gap-4 mb-4">
-                    <button onClick={() => setMoneyForm({...moneyForm, type: 'ADVANCE'})} className={`flex-1 py-2 rounded-lg font-bold text-sm ${moneyForm.type === 'ADVANCE' ? 'bg-red-50 text-red-600 border border-red-200' : 'text-slate-400 bg-slate-50'}`}>Give Advance (-)</button>
-                    <button onClick={() => setMoneyForm({...moneyForm, type: 'BONUS'})} className={`flex-1 py-2 rounded-lg font-bold text-sm ${moneyForm.type === 'BONUS' ? 'bg-green-50 text-green-600 border border-green-200' : 'text-slate-400 bg-slate-50'}`}>Give Bonus (+)</button>
-                  </div>
-                  
-                  {isAdmin ? (
-                    <form onSubmit={addMoneyEntry} className="flex gap-3">
-                        <input type="number" placeholder="Amount (₹)" className="border-2 border-gray-100 p-3 rounded-xl font-bold w-32 focus:border-orange-500 outline-none text-lg" value={moneyForm.amount} onChange={e => setMoneyForm({...moneyForm, amount: e.target.value})} />
-                        <input type="text" placeholder={`Reason for ${moneyForm.type.toLowerCase()}...`} className="border-2 border-gray-100 p-3 rounded-xl font-bold flex-1 focus:border-orange-500 outline-none" value={moneyForm.reason} onChange={e => setMoneyForm({...moneyForm, reason: e.target.value})} />
-                        <button className={`text-white px-6 rounded-xl font-bold ${moneyForm.type === 'ADVANCE' ? 'bg-red-500 hover:bg-red-600' : 'bg-green-500 hover:bg-green-600'}`}>Add</button>
-                    </form>
-                  ) : (
-                    <div className="p-3 bg-slate-50 text-center rounded-xl border border-slate-200 font-bold text-slate-400 text-sm">
-                        <Lock size={16} className="inline mr-2"/> Login as Admin to add money entries
-                    </div>
-                  )}
-                </div>
-
-                {/* Transaction History for SELECTED MONTH */}
-                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-                  <div className="p-4 bg-slate-50 border-b border-gray-200 font-bold text-slate-700 text-sm flex justify-between">
-                    <span>Transaction History</span>
-                    <span className="text-gray-400">{formatMonth(viewMonth)}</span>
-                  </div>
-                  <table className="w-full text-sm text-left">
-                    <tbody className="divide-y divide-gray-100">
-                      <tr className="bg-slate-50/50">
-                        <td className="p-4 font-bold text-slate-600">Base Earnings</td>
-                        <td className="p-4 text-xs text-slate-400 font-bold uppercase">{getWorkerStats(selectedWorker.id).present} Days Present</td>
-                        <td className="p-4 text-right font-black text-slate-700">+ ₹{getWorkerStats(selectedWorker.id).earned}</td>
-                        <td className="p-4 w-10"></td>
-                      </tr>
-                      
-                      {getWorkerStats(selectedWorker.id).monthlyBonuses.map((b, idx) => (
-                         <tr key={idx} className="hover:bg-green-50">
-                           <td className="p-4 font-bold text-green-700">{b.date}</td>
-                           <td className="p-4"><span className="bg-green-100 text-green-800 px-2 py-1 rounded text-xs font-bold uppercase">Bonus</span> <span className="text-gray-500 font-medium ml-2">{b.reason}</span></td>
-                           <td className="p-4 text-right font-black text-green-600">+ ₹{b.amount}</td>
-                           <td className="p-4 text-center"></td>
-                         </tr>
-                      ))}
-
-                      {getWorkerStats(selectedWorker.id).monthlyAdvances.map((a, idx) => (
-                         <tr key={idx} className="hover:bg-red-50">
-                           <td className="p-4 font-bold text-red-700">{a.date}</td>
-                           <td className="p-4"><span className="bg-red-100 text-red-800 px-2 py-1 rounded text-xs font-bold uppercase">Advance</span> <span className="text-gray-500 font-medium ml-2">{a.reason}</span></td>
-                           <td className="p-4 text-right font-black text-red-600">- ₹{a.amount}</td>
-                           <td className="p-4 text-center"></td>
-                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </>
-            ) : (
-              <div className="h-full flex items-center justify-center text-slate-400 font-bold bg-slate-50 rounded-2xl border-2 border-dashed border-slate-200">
-                Select a worker to manage payroll
+                 <div className="flex gap-2 mt-4">
+                    <button onClick={() => openStockAction(item, 'IN')} disabled={!isAdmin} className="flex-1 bg-green-50 text-green-700 py-2 rounded-lg font-black text-xs hover:bg-green-100 flex items-center justify-center gap-1 disabled:opacity-50"><Plus size={14}/> ADD</button>
+                    <button onClick={() => openStockAction(item, 'OUT')} disabled={!isAdmin || item.qty <= 0} className="flex-1 bg-slate-900 text-white py-2 rounded-lg font-black text-xs hover:bg-black flex items-center justify-center gap-1 disabled:opacity-50 disabled:bg-slate-300"><Minus size={14}/> USE</button>
+                 </div>
               </div>
-            )}
-          </div>
+            )
+          })}
+        </div>
+      ) : (
+        // LIST VIEW
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+           <table className="w-full text-sm text-left">
+              <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-xs">
+                 <tr><th className="p-4">Item Name</th><th className="p-4">Category</th><th className="p-4 text-center">Stock</th><th className="p-4 text-right">Value</th><th className="p-4 text-center">Actions</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                 {filteredItems.map(item => (
+                    <tr key={item.id} className="hover:bg-slate-50">
+                       <td className="p-4 font-bold text-slate-800 flex items-center gap-2">{item.name} {item.qty <= item.minLevel && <AlertTriangle size={14} className="text-red-500"/>}</td>
+                       <td className="p-4 text-slate-500 font-bold text-xs">{item.category}</td>
+                       <td className="p-4 text-center"><span className="font-black text-slate-800">{item.qty}</span> <span className="text-xs text-slate-400">{item.unit}</span></td>
+                       <td className="p-4 text-right font-bold text-slate-600">₹{(item.qty * item.price).toLocaleString()}</td>
+                       <td className="p-4 flex justify-center gap-2">
+                          <button onClick={() => handleDirectEdit(item)} className="p-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100" title="Correct Stock"><Edit3 size={14}/></button>
+                          <button onClick={() => openStockAction(item, 'IN')} disabled={!isAdmin} className="p-1.5 bg-green-100 text-green-700 rounded-lg hover:bg-green-200 disabled:opacity-50"><Plus size={14}/></button>
+                          <button onClick={() => openStockAction(item, 'OUT')} disabled={!isAdmin || item.qty <= 0} className="p-1.5 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 disabled:opacity-50"><Minus size={14}/></button>
+                       </td>
+                    </tr>
+                 ))}
+              </tbody>
+           </table>
         </div>
       )}
-
-      {/* --- TAB 3: MANAGE WORKERS (UNCHANGED) --- */}
-      {activeTab === 'workers' && (
-        <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm max-w-2xl mx-auto animate-fade-in">
-          <h3 className="font-bold text-slate-700 uppercase mb-4 flex items-center gap-2"><UserPlus size={18}/> Add New Worker</h3>
-          
-          {isAdmin ? (
-            <form onSubmit={addWorker} className="grid grid-cols-2 gap-4 mb-8">
-                <div className="col-span-2"><label className="text-xs font-bold text-gray-400 uppercase">Full Name</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.name} onChange={e => setNewWorker({...newWorker, name: e.target.value})} placeholder="e.g. Rahul Patil"/></div>
-                
-                <div>
-                <label className="text-xs font-bold text-gray-400 uppercase">Role</label>
-                <input list="roleList" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold bg-white focus:border-orange-500 outline-none" value={newWorker.role} onChange={e => setNewWorker({...newWorker, role: e.target.value})} placeholder="Type or Select..." />
-                <datalist id="roleList">
-                    <option value="Driver"/><option value="Helper"/><option value="Mistri"/><option value="Supervisor"/><option value="Security"/><option value="Operator"/>
-                </datalist>
-                </div>
-                
-                <div><label className="text-xs font-bold text-gray-400 uppercase">Daily Rate (₹)</label><input type="number" className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.rate} onChange={e => setNewWorker({...newWorker, rate: e.target.value})} /></div>
-                
-                <div className="col-span-2"><label className="text-xs font-bold text-gray-400 uppercase">Mobile</label><input className="w-full border-2 border-gray-100 p-2.5 rounded-lg font-bold focus:border-orange-500 outline-none" value={newWorker.phone} onChange={e => setNewWorker({...newWorker, phone: e.target.value})} placeholder="Optional for WhatsApp"/></div>
-                
-                <button className="col-span-2 bg-slate-900 text-white py-3 rounded-lg font-bold hover:bg-black">Save Worker</button>
-            </form>
-          ) : (
-            <div className="mb-8 p-4 bg-slate-50 border-2 border-dashed border-slate-200 rounded-xl text-center text-slate-400 font-bold text-sm">
-                Login as Admin to add new workers.
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <h4 className="font-bold text-gray-400 text-xs uppercase mb-2">Current Staff</h4>
-            {workers.map(w => (
-              <div key={w.id} className="flex justify-between items-center p-3 border border-gray-100 rounded-lg hover:bg-slate-50">
-                <div>
-                  <div className="font-bold text-slate-800">{w.name}</div>
-                  <div className="text-xs text-slate-500 font-bold uppercase">{w.role} • ₹{w.rate}/day</div>
-                </div>
-                <div className="flex gap-2">
-                  {w.phone && <a href={`https://wa.me/${w.phone}`} target="_blank" className="p-2 text-green-600 hover:bg-green-50 rounded-lg"><MessageCircle size={18}/></a>}
-                  {isAdmin && <button onClick={() => removeWorker(w.firebaseId, w.id)} className="p-2 text-slate-300 hover:text-red-500"><Trash2 size={18}/></button>}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* --- HIDDEN PRINT SLIP (UPDATED: MONTHLY) --- */}
-      <div className="hidden print:block p-8 bg-white text-black print-area">
-        {selectedWorker && (
-          <div className="border-2 border-black p-8 max-w-lg mx-auto mt-10 text-center">
-            {/* Header */}
-            <h1 className="font-black text-2xl uppercase tracking-tighter">BALDIGAMBAR ENTERPRISES</h1>
-            <p className="text-xs font-bold uppercase mb-6 border-b-2 border-black pb-2">Salary Voucher & Muster Roll</p>
-            
-            {/* Info Block */}
-            <div className="text-left mb-6 grid grid-cols-2 gap-4">
-              <div><span className="text-xs uppercase text-gray-500 font-bold block">Worker Name</span><span className="font-black text-xl">{selectedWorker.name}</span></div>
-              <div className="text-right"><span className="text-xs uppercase text-gray-500 font-bold block">Month</span><span className="font-bold text-lg">{formatMonth(viewMonth)}</span></div>
-              <div><span className="text-xs uppercase text-gray-500 font-bold block">Role</span><span className="font-bold">{selectedWorker.role}</span></div>
-              <div className="text-right"><span className="text-xs uppercase text-gray-500 font-bold block">Generated</span><span className="font-bold">{new Date().toLocaleDateString()}</span></div>
-            </div>
-
-            {/* Calculations */}
-            <div className="border-t-2 border-dashed border-black pt-4 pb-4 space-y-2 text-left">
-              <div className="flex justify-between"><span className="font-bold">Days Present ({getWorkerStats(selectedWorker.id).present})</span><span className="font-bold">₹{getWorkerStats(selectedWorker.id).earned}</span></div>
-              <div className="flex justify-between"><span className="font-bold text-gray-600">Incentive / Bonus</span><span className="font-bold text-gray-600">+ ₹{getWorkerStats(selectedWorker.id).totalBonus}</span></div>
-              <div className="flex justify-between"><span className="font-bold text-gray-600">Less: Advance (This Month)</span><span className="font-bold text-gray-600">- ₹{getWorkerStats(selectedWorker.id).totalAdvance}</span></div>
-            </div>
-            
-            {/* Net Pay */}
-            <div className="flex justify-between text-2xl font-black border-t-2 border-black pt-4 mt-2">
-                <span>NET PAYABLE</span>
-                <span>₹{getWorkerStats(selectedWorker.id).payable.toLocaleString()}</span>
-            </div>
-
-            {/* NEW: MONTHLY MUSTER GRID */}
-            <div className="mt-8 text-left">
-                <p className="text-xs font-bold uppercase mb-2">Monthly Muster Grid</p>
-                <div className="grid grid-cols-7 gap-0 border border-black">
-                    {getWorkerStats(selectedWorker.id).monthLog.map((log) => (
-                        <div key={log.day} className="border border-black p-1 text-center">
-                            <div className="text-[9px] text-gray-500">{log.day}</div>
-                            <div className={`font-bold text-xs ${log.status === 'A' ? 'text-black' : ''}`}>
-                                {log.status === '-' ? '' : log.status}
-                            </div>
-                        </div>
-                    ))}
-                </div>
-                <div className="flex gap-4 mt-2 text-[10px] uppercase font-bold text-gray-500">
-                    <span>P = Present</span><span>H = Half Day</span><span>A = Absent</span>
-                </div>
-            </div>
-
-            {/* Signature */}
-            <div className="mt-12 pt-4 border-t border-black flex justify-between text-xs font-bold uppercase"><span>Receiver Signature</span><span>Manager Signature</span></div>
-          </div>
-        )}
-      </div>
-
     </div>
   );
 }
