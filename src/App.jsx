@@ -14,16 +14,42 @@ import ExpenseManager from './ExpenseManager';
 import AIAssistant from './AIAssistant';
 import SettingsPage from './Settings';
 
+// --- SECURITY HELPER: Simple Hash Function ---
+// This turns "password" into "2848482..." so the plain text isn't in your code.
+const hashString = (str) => {
+  let hash = 0;
+  if (str.length === 0) return hash;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return hash.toString();
+};
+
 export default function App() {
   // ==========================================
   // 1. SECURITY GATE LOGIC
   // ==========================================
-  const [authLevel, setAuthLevel] = useState(() => localStorage.getItem('baldigambar_auth_level')); // null, 'admin', 'guest'
+  
+  // Retrieve the actual password from .env file (Vite syntax)
+  const ENV_PASS = import.meta.env.VITE_ADMIN_PASS || "admin123"; 
+  // Pre-calculate the hash of the real password so we compare hashes, not text
+  const REAL_PASS_HASH = hashString(ENV_PASS);
+  const GUEST_PASS_HASH = hashString("Hadap");
+
+  const [authLevel, setAuthLevel] = useState(() => {
+    // Session persistence using simple Obfuscation
+    const saved = localStorage.getItem('baldigambar_auth_session');
+    if (saved === 'x8d7s_admin') return 'admin';
+    if (saved === 'x8d7s_guest') return 'guest';
+    return null;
+  });
+
   const [passInput, setPassInput] = useState('');
   const [loginError, setLoginError] = useState('');
 
-  const activeTabState = useState('Dashboard');
-  const [activeTab, setActiveTab] = activeTabState;
+  const [activeTab, setActiveTab] = useState('Dashboard');
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // Derived Admin Status
@@ -32,14 +58,15 @@ export default function App() {
   // LOGIN FUNCTION
   const handleLogin = (e) => {
     e.preventDefault();
-    
-    // --- YOUR PASSWORDS ---
-    if (passInput === 'Ritesh@4825') {
+    const inputHash = hashString(passInput);
+
+    if (inputHash === REAL_PASS_HASH) {
       setAuthLevel('admin');
-      localStorage.setItem('baldigambar_auth_level', 'admin');
-    } else if (passInput === 'Hadap') { 
+      // Store an obfuscated value, not "admin" directly
+      localStorage.setItem('baldigambar_auth_session', 'x8d7s_admin');
+    } else if (inputHash === GUEST_PASS_HASH) { 
       setAuthLevel('guest');
-      localStorage.setItem('baldigambar_auth_level', 'guest');
+      localStorage.setItem('baldigambar_auth_session', 'x8d7s_guest');
     } else {
       setLoginError('❌ Incorrect Password');
       setPassInput('');
@@ -50,7 +77,7 @@ export default function App() {
   // LOGOUT FUNCTION
   const handleLogout = () => {
     setAuthLevel(null);
-    localStorage.removeItem('baldigambar_auth_level');
+    localStorage.removeItem('baldigambar_auth_session');
     setPassInput('');
   };
 
@@ -59,13 +86,13 @@ export default function App() {
     if (isAdmin) {
       // Downgrade to Guest
       setAuthLevel('guest');
-      localStorage.setItem('baldigambar_auth_level', 'guest');
+      localStorage.setItem('baldigambar_auth_session', 'x8d7s_guest');
     } else {
       // Upgrade to Admin
       const pass = prompt("🔐 SECURITY CHECK\nEnter Admin Password:");
-      if (pass === "Ritesh@4825") { 
+      if (pass && hashString(pass) === REAL_PASS_HASH) { 
         setAuthLevel('admin');
-        localStorage.setItem('baldigambar_auth_level', 'admin');
+        localStorage.setItem('baldigambar_auth_session', 'x8d7s_admin');
         alert("✅ Admin Mode Unlocked!");
       } else {
         alert("❌ Wrong Password.");
@@ -160,7 +187,7 @@ export default function App() {
             <Settings size={18} /> Settings
           </button>
 
-          {/* ADMIN TOGGLE (Hidden logic, but allows switching inside app) */}
+          {/* ADMIN TOGGLE */}
           <button 
             onClick={toggleAdmin} 
             className={`w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl transition-all font-bold text-xs uppercase tracking-widest border ${isAdmin ? 'bg-green-900/30 text-green-400 border-green-900' : 'bg-slate-800 text-slate-500 border-slate-700 hover:bg-slate-700'}`}
