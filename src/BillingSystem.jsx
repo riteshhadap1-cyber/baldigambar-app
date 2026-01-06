@@ -11,7 +11,7 @@ import {
   ref, onValue, push, set, update, remove, query, limitToLast 
 } from 'firebase/database';
 
-// --- HELPER COMPONENT (OUTSIDE to fix typing focus bug) ---
+// --- HELPER COMPONENT (OUTSIDE to prevent focus loss) ---
 const AutoResizeTextarea = ({ value, onChange, placeholder, disabled }) => {
   const textareaRef = useRef(null);
   useEffect(() => {
@@ -64,14 +64,13 @@ export default function BillingSystem({ isAdmin }) {
     isGst: false,
     gstRate: 18,
     advances: 0, 
-    advanceNote: '', // NEW: Note for initial advance
+    advanceNote: '', 
     payments: [], 
     discount: 0, 
     discountReason: '',
     paymentMode: 'Cash'
   });
 
-  // NEW: Added 'note' to payment state
   const [newPayment, setNewPayment] = useState({ 
     date: new Date().toISOString().split('T')[0], 
     amount: '', 
@@ -111,7 +110,7 @@ export default function BillingSystem({ isAdmin }) {
       payHistory: 'जमा तपशील (Payment History)',
       phDate: 'तारीख',
       phMode: 'माध्यम',
-      phNote: 'तपशील', // Note column
+      phNote: 'तपशील', 
       phAmount: 'रक्कम',
       billNo: 'बिल नं.'
     },
@@ -136,7 +135,7 @@ export default function BillingSystem({ isAdmin }) {
       payHistory: 'Payment History',
       phDate: 'Date',
       phMode: 'Mode',
-      phNote: 'Note', // Note column
+      phNote: 'Note', 
       phAmount: 'Amount',
       billNo: 'Bill No'
     }
@@ -266,7 +265,6 @@ export default function BillingSystem({ isAdmin }) {
     }
     alert("Invoice Saved Successfully!");
     
-    // Reset if it's a new invoice
     if(!formData.firebaseId) {
         const maxNo = Math.max(...invoices.map(i => Number(i.billNo) || 0));
         setFormData({
@@ -282,7 +280,6 @@ export default function BillingSystem({ isAdmin }) {
     }
   };
 
-  // --- ADD PAYMENT (With Note) ---
   const handleAddPayment = () => {
     if (!isAdmin) return;
     if (!formData.firebaseId) return alert("Please SAVE the invoice first before adding payments.");
@@ -291,10 +288,8 @@ export default function BillingSystem({ isAdmin }) {
     const paymentEntry = { ...newPayment, id: Date.now() };
     const updatedPayments = [...(formData.payments || []), paymentEntry];
     
-    // 1. Update Invoice
     update(ref(db, `invoices/${formData.firebaseId}`), { payments: updatedPayments });
     
-    // 2. Add to Cashbook (With Note)
     const noteText = newPayment.note ? ` (${newPayment.note})` : '';
     push(ref(db, 'cashbook'), {
         date: newPayment.date,
@@ -368,23 +363,33 @@ export default function BillingSystem({ isAdmin }) {
   return (
     <div className="space-y-6 pb-20 font-sans text-slate-800 animate-fade-in">
       
-      {/* PRINT STYLES */}
+      {/* PRINT STYLES - ROBUST CENTERING */}
       <style>{`
         input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
         
         @media print {
+          @page { margin: 0; size: auto; }
+          body { margin: 0; padding: 0; background: white; }
           body * { visibility: hidden; }
+          
+          /* Only show the print wrapper and its children */
           .print-wrapper, .print-wrapper * { visibility: visible; }
-          .print-wrapper { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; background: white; z-index: 9999; }
-          html, body { height: auto !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; }
-          thead { display: table-header-group; }
-          tfoot { display: table-footer-group; }
-          tr { page-break-inside: avoid; }
-          body { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-          .border-red-600 { border-color: #dc2626 !important; }
-          .text-red-600 { color: #dc2626 !important; }
-          .bg-red-50 { background-color: #fef2f2 !important; }
+          
+          /* --- FIXED: CENTERING LOGIC --- */
+          .print-wrapper { 
+            position: absolute !important; 
+            left: 50% !important;
+            transform: translateX(-50%) scale(0.95) !important; /* Center and Scale Down 5% */
+            transform-origin: top center !important;
+            top: 0 !important;
+            margin: 0 !important;
+            padding-top: 5mm !important;
+            box-shadow: none !important;
+            border: none !important;
+            width: 210mm !important;
+          }
+          
           .no-print { display: none !important; }
           .print-content-visible { display: block !important; }
           .print-input-hidden { display: none !important; }
@@ -462,7 +467,7 @@ export default function BillingSystem({ isAdmin }) {
       {/* --- LETTERHEAD TAB --- */}
       {activeTab === 'letterhead' && (
         <div className="flex justify-center animate-fade-in">
-           <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 flex flex-col ${paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px]' : 'w-[210mm] min-h-[297mm] text-sm'}`}>
+           <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 flex flex-col ${paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px] print:w-[148mm]' : 'w-[210mm] min-h-[297mm] text-sm print:w-[210mm]'}`}>
               <div className="mb-2">
                 <div className={`flex justify-between items-end font-bold text-red-600 mb-1 ${paperSize === 'A5' ? 'text-[9px]' : 'text-sm'}`}>
                   <div className="text-left leading-tight"><p>{bizProfile.headerName1}</p><p>मो. {bizProfile.headerMobile1}</p></div>
@@ -576,7 +581,7 @@ export default function BillingSystem({ isAdmin }) {
           {/* PREVIEW SIDEBAR */}
           <div className="lg:w-2/3 bg-slate-100 p-4 lg:p-8 rounded-2xl overflow-auto print:p-0 print:bg-white print:w-full print:rounded-none flex justify-center">
             <div className={`print-wrapper bg-white print:bg-red-50 p-[10mm] shadow-xl print:shadow-none text-red-700 font-sans transition-all duration-300 ${
-                paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px]' : 'w-[210mm] min-h-[297mm] text-sm'
+                paperSize === 'A5' ? 'w-[148mm] min-h-[210mm] text-[10px] print:w-[148mm]' : 'w-[210mm] min-h-[297mm] text-sm print:w-[210mm]'
               }`}>
               
               {/* PAID STAMP */}
