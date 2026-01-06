@@ -120,65 +120,70 @@ export default function LaborManager({ isAdmin }) {
     }
   };
 
+  // --- INTEGRATION: ADDS TO CASHBOOK ---
   const addMoneyEntry = (e) => {
     e.preventDefault();
     if (!isAdmin) return;
     if (!selectedWorker || !moneyForm.amount) return;
     
+    const amount = Number(moneyForm.amount);
+    
     const newEntry = { 
       id: Date.now(), 
       date: moneyForm.date, 
-      amount: Number(moneyForm.amount), 
+      amount: amount, 
       reason: moneyForm.reason 
     };
 
     if (moneyForm.type === 'ADVANCE') {
+      // 1. Add to Labor Data
       push(ref(db, `labor_advances/${selectedWorker.id}`), newEntry);
+      
+      // 2. Add to CASHBOOK (Expense)
+      push(ref(db, 'cashbook'), {
+        date: moneyForm.date,
+        type: 'Expense',
+        category: 'Salaries',
+        site: 'General',
+        payee: selectedWorker.name,
+        amount: amount,
+        mode: 'Cash',
+        note: `Labor Advance: ${moneyForm.reason}`,
+        status: 'Paid',
+        timestamp: Date.now()
+      });
+
     } else {
+      // 1. Add to Labor Data
       push(ref(db, `labor_bonuses/${selectedWorker.id}`), newEntry);
+
+      // 2. Add to CASHBOOK (Expense)
+      push(ref(db, 'cashbook'), {
+        date: moneyForm.date,
+        type: 'Expense',
+        category: 'Salaries', // Bonus is also salary cost
+        site: 'General',
+        payee: selectedWorker.name,
+        amount: amount,
+        mode: 'Cash',
+        note: `Labor Bonus: ${moneyForm.reason}`,
+        status: 'Paid',
+        timestamp: Date.now()
+      });
     }
     setMoneyForm(prev => ({ ...prev, amount: '', reason: '' }));
+    alert("Saved & Added to Business Expenses!");
   };
 
   const deleteMoneyEntry = (workerId, firebaseKey, type) => {
     if (!isAdmin) return;
-    if(!confirm("Delete this entry?")) return;
+    if(!confirm("Delete this entry? (Note: Delete corresponding Cashbook entry manually if needed)")) return;
     
     if (type === 'ADVANCE') {
       remove(ref(db, `labor_advances/${workerId}/${firebaseKey}`));
     } else {
       remove(ref(db, `labor_bonuses/${workerId}/${firebaseKey}`));
     }
-  };
-
-  // --- CSV EXPORT ---
-  const downloadCSV = () => {
-    if (!selectedWorker) return;
-    const stats = getWorkerStats(selectedWorker.id);
-    let csvContent = "data:text/csv;charset=utf-8,";
-    csvContent += `BALDIGAMBAR ENTERPRISES - PAYROLL REPORT\n`;
-    csvContent += `Worker,${selectedWorker.name}\n`;
-    csvContent += `Month,${viewMonth}\n\n`;
-    
-    csvContent += "DATE,STATUS,DAY\n";
-    stats.monthLog.forEach(log => {
-        csvContent += `${log.dateStr},${log.status},${log.dayName}\n`;
-    });
-
-    csvContent += `\nSUMMARY\n`;
-    csvContent += `Days Present,${stats.present}\n`;
-    csvContent += `Half Days,${stats.half}\n`;
-    csvContent += `Total Earned,${stats.earned}\n`;
-    csvContent += `Total Bonus,${stats.totalBonus}\n`;
-    csvContent += `Total Advance,${stats.totalAdvance}\n`;
-    csvContent += `NET PAYABLE,${stats.payable}\n`;
-
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `${selectedWorker.name}_${viewMonth}_Report.csv`);
-    document.body.appendChild(link);
-    link.click();
   };
 
   // --- STATS LOGIC ---
@@ -249,25 +254,31 @@ export default function LaborManager({ isAdmin }) {
   return (
     <div className={`space-y-6 pb-20 font-sans text-slate-800 animate-fade-in ${inkSaver ? 'print-ink-saver' : ''}`}>
       
-      {/* PRINT STYLES */}
+      {/* PRINT STYLES FIXED */}
       <style>{`
         @media print {
-          aside, nav, header, .no-print { display: none !important; }
-          main { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; }
-          body { background: white !important; -webkit-print-color-adjust: exact; }
-          .print-area { display: block !important; padding: 0 !important; width: 100%; }
+          /* HIDE UI ELEMENTS */
+          aside, nav, header, .no-print, .dashboard-stats, .tabs-nav { display: none !important; }
+          
+          /* LAYOUT FIXES */
+          main { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; overflow: visible !important; }
+          body { background: white !important; font-size: 12px; }
+          
+          /* SHOW ONLY PRINT AREA */
+          .print-area { display: block !important; position: absolute; top: 0; left: 0; width: 100%; }
+          
+          /* TABLE STYLES */
+          .muster-grid { display: grid; grid-template-columns: repeat(16, 1fr); border: 1px solid black; margin-top: 10px; }
+          .muster-cell { border: 1px solid black; padding: 4px 2px; text-align: center; font-size: 10px; }
+          .sunday-cell { background-color: #eee !important; -webkit-print-color-adjust: exact; }
+          
+          /* INK SAVER */
           .print-ink-saver * { color: black !important; background: transparent !important; border-color: black !important; box-shadow: none !important; }
-          .print-ink-saver .bg-black { background: white !important; border: 1px solid black !important; color: black !important; }
-          .print-ink-saver .text-white { color: black !important; }
-          .print-ink-saver .bg-slate-900 { background: white !important; border: 2px solid black !important; }
-          .muster-grid { display: grid; grid-template-columns: repeat(16, 1fr); border: 2px solid black; }
-          .muster-cell { border: 1px solid black; padding: 2px; text-align: center; font-size: 10px; }
-          .sunday-cell { background-color: #f3f4f6 !important; -webkit-print-color-adjust: exact; } 
         }
       `}</style>
 
-      {/* DASHBOARD HEADER */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 no-print">
+      {/* DASHBOARD HEADER (Stats) */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 no-print dashboard-stats">
         <div className="bg-white p-3 rounded-2xl border border-gray-200 shadow-sm flex items-center gap-3">
             <div className="bg-orange-100 p-2 rounded-lg text-orange-600"><Users size={20}/></div>
             <div><p className="text-[10px] text-gray-400 font-bold uppercase">Total Staff</p><p className="font-black text-xl">{workers.length}</p></div>
@@ -291,7 +302,7 @@ export default function LaborManager({ isAdmin }) {
       </div>
 
       {/* NAVIGATION TABS */}
-      <div className="flex flex-col md:flex-row justify-between items-center gap-4 no-print">
+      <div className="flex flex-col md:flex-row justify-between items-center gap-4 no-print tabs-nav">
         <div className="flex gap-2 bg-white p-1 rounded-xl border border-gray-200 shadow-sm w-full md:w-auto">
           <button onClick={() => setActiveTab('attendance')} className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'attendance' ? 'bg-slate-900 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Daily Muster</button>
           <button onClick={() => setActiveTab('payroll')} className={`flex-1 md:flex-none px-4 py-2 rounded-lg text-sm font-bold ${activeTab === 'payroll' ? 'bg-slate-900 text-white shadow' : 'text-gray-500 hover:bg-gray-50'}`}>Monthly Payroll</button>
@@ -311,16 +322,13 @@ export default function LaborManager({ isAdmin }) {
                 <button onClick={() => changeMonth(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
                     <ChevronLeft size={20} />
                 </button>
-                
                 <div className="relative px-4 py-1 text-center min-w-[140px] group">
                     <div className="flex flex-col items-center cursor-pointer">
                         <span className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Payroll Month</span>
                         <span className="text-sm font-bold text-slate-700 uppercase tracking-wider group-hover:text-orange-600 transition-colors">{formatMonth(viewMonth)}</span>
                     </div>
-                    {/* Hidden input overlay */}
                     <input type="month" value={viewMonth} onChange={(e) => setViewMonth(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"/>
                 </div>
-
                 <button onClick={() => changeMonth(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
                     <ChevronRight size={20} />
                 </button>
@@ -331,12 +339,11 @@ export default function LaborManager({ isAdmin }) {
 
       {/* --- TAB 1: DAILY ATTENDANCE --- */}
       {activeTab === 'attendance' && (
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden animate-fade-in">
+        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden animate-fade-in no-print">
           <div className="p-4 bg-slate-50 border-b border-gray-200 flex justify-between items-center">
             <h3 className="font-bold text-slate-700 uppercase text-sm">Attendance List</h3>
             <div className="flex gap-2">
                 {isAdmin && <button onClick={markAllPresent} className="text-xs font-bold bg-green-100 text-green-700 px-3 py-1.5 rounded-lg hover:bg-green-200 transition-colors">Mark All Present</button>}
-                <button onClick={() => window.print()} className="text-xs font-bold bg-slate-200 text-slate-600 px-3 py-1.5 rounded-lg hover:bg-slate-300 flex items-center gap-1"><Printer size={14}/> Print</button>
             </div>
           </div>
           
@@ -372,7 +379,7 @@ export default function LaborManager({ isAdmin }) {
 
       {/* --- TAB 2: MONTHLY PAYROLL --- */}
       {activeTab === 'payroll' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in no-print">
           
           <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden lg:col-span-1 h-fit">
             <div className="p-4 border-b border-gray-200 font-bold text-slate-700 bg-slate-50 flex justify-between">
@@ -428,10 +435,6 @@ export default function LaborManager({ isAdmin }) {
                     </div>
                     
                     <div className="col-span-2 md:col-span-1 flex gap-2">
-                        <button onClick={downloadCSV} className="flex-1 bg-slate-700 hover:bg-slate-600 text-white p-2 rounded-xl flex flex-col items-center justify-center transition-colors">
-                            <Download size={18}/>
-                            <span className="text-[9px] uppercase mt-1">CSV</span>
-                        </button>
                         <button onClick={() => window.print()} className="flex-1 bg-white hover:bg-gray-100 text-slate-900 p-2 rounded-xl flex flex-col items-center justify-center transition-colors">
                             <Printer size={18}/>
                             <span className="text-[9px] uppercase mt-1 font-bold">Print Slip</span>
@@ -507,7 +510,7 @@ export default function LaborManager({ isAdmin }) {
 
       {/* --- TAB 3: MANAGE WORKERS --- */}
       {activeTab === 'workers' && (
-        <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm max-w-2xl mx-auto animate-fade-in">
+        <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm max-w-2xl mx-auto animate-fade-in no-print">
           <h3 className="font-bold text-slate-700 uppercase mb-4 flex items-center gap-2"><UserPlus size={18}/> Add New Worker</h3>
           
           {isAdmin ? (
@@ -543,67 +546,62 @@ export default function LaborManager({ isAdmin }) {
         </div>
       )}
 
-      {/* --- PRINT SLIP --- */}
-      <div className="hidden print:block p-8 bg-white text-black print-area">
-        {selectedWorker && (
-          <div className="border-2 border-black p-8 max-w-3xl mx-auto mt-4 text-center">
+      {/* --- HIDDEN PRINT AREA (Only visible on print) --- */}
+      {selectedWorker && (
+        <div className="print-area hidden">
+          <div className="border border-black p-8 max-w-[210mm] mx-auto h-[297mm]">
             {/* Header */}
-            <div className="border-b-4 border-black pb-4 mb-6">
-                <h1 className="font-black text-3xl uppercase tracking-tighter">BALDIGAMBAR ENTERPRISES</h1>
-                <p className="text-sm font-bold uppercase tracking-widest mt-1">Salary Payment Voucher</p>
+            <div className="text-center border-b-2 border-black pb-4 mb-6">
+                <h1 className="font-black text-2xl uppercase tracking-widest">BALDIGAMBAR ENTERPRISES</h1>
+                <p className="text-xs font-bold uppercase mt-1">Salary Slip / Payment Voucher</p>
             </div>
             
-            {/* Worker Info & Totals */}
-            <div className="grid grid-cols-2 gap-8 text-left mb-6">
+            {/* Info Block */}
+            <div className="grid grid-cols-2 gap-8 text-left mb-6 border-b border-black pb-6">
                 <div>
-                    <div className="mb-4"><span className="text-[10px] uppercase font-bold block text-gray-500">Employee Name</span><span className="font-black text-xl block border-b border-black">{selectedWorker.name}</span></div>
-                    <div className="grid grid-cols-2 gap-4">
-                        <div><span className="text-[10px] uppercase font-bold block text-gray-500">Designation</span><span className="font-bold block">{selectedWorker.role}</span></div>
-                        <div><span className="text-[10px] uppercase font-bold block text-gray-500">Month</span><span className="font-bold block">{formatMonth(viewMonth)}</span></div>
-                    </div>
+                    <div className="mb-4"><span className="text-[10px] uppercase font-bold text-gray-500 block">Name</span><span className="font-black text-xl uppercase">{selectedWorker.name}</span></div>
+                    <div><span className="text-[10px] uppercase font-bold text-gray-500 block">Role</span><span className="font-bold">{selectedWorker.role}</span></div>
                 </div>
-                <div className="border-l-2 border-black pl-8 flex flex-col justify-center">
-                    <div className="flex justify-between mb-2"><span className="font-bold">Total Earnings</span><span className="font-bold">₹{getWorkerStats(selectedWorker.id).earned}</span></div>
-                    <div className="flex justify-between mb-2"><span className="font-bold">Incentives</span><span className="font-bold">+ ₹{getWorkerStats(selectedWorker.id).totalBonus}</span></div>
-                    <div className="flex justify-between mb-2"><span className="font-bold">Less: Advance</span><span className="font-bold">- ₹{getWorkerStats(selectedWorker.id).totalAdvance}</span></div>
-                    <div className="flex justify-between text-xl font-black border-t-2 border-black pt-2 mt-2"><span>NET PAYABLE</span><span>₹{getWorkerStats(selectedWorker.id).payable.toLocaleString()}</span></div>
+                <div className="text-right">
+                    <div className="mb-4"><span className="text-[10px] uppercase font-bold text-gray-500 block">Month</span><span className="font-black text-xl uppercase">{formatMonth(viewMonth)}</span></div>
+                    <div><span className="text-[10px] uppercase font-bold text-gray-500 block">Rate</span><span className="font-bold">₹{selectedWorker.rate} / day</span></div>
                 </div>
             </div>
 
-            {/* MUSTER GRID */}
-            <div className="mt-8 text-left">
-                <p className="text-[10px] font-bold uppercase mb-2">Attendance Register (Muster Roll)</p>
-                {/* 1st to 16th */}
-                <div className="muster-grid mb-2">
-                    {getWorkerStats(selectedWorker.id).monthLog.slice(0, 16).map((log) => (
-                        <div key={log.day} className={`muster-cell ${log.isSunday ? 'sunday-cell' : ''}`}>
-                            <div className="font-bold border-b border-black bg-gray-100">{log.day}</div>
-                            <div className="text-[8px] uppercase">{log.dayName.charAt(0)}</div>
-                            <div className="font-black text-sm">{log.status === '-' ? '' : log.status}</div>
-                        </div>
-                    ))}
-                </div>
-                {/* 17th to End */}
+            {/* Calculations */}
+            <div className="bg-gray-100 border border-black p-4 mb-6">
+                 <div className="flex justify-between mb-2"><span className="font-bold">Days Worked</span><span>{getWorkerStats(selectedWorker.id).present} Days</span></div>
+                 <div className="flex justify-between mb-2"><span className="font-bold">Total Earnings</span><span>₹{getWorkerStats(selectedWorker.id).earned}</span></div>
+                 <div className="flex justify-between mb-2"><span className="font-bold">Bonus / Incentives</span><span>+ ₹{getWorkerStats(selectedWorker.id).totalBonus}</span></div>
+                 <div className="flex justify-between mb-2"><span className="font-bold">Less: Advance Taken</span><span>- ₹{getWorkerStats(selectedWorker.id).totalAdvance}</span></div>
+                 <div className="flex justify-between pt-2 border-t border-black text-lg font-black mt-2">
+                    <span>NET PAYABLE</span>
+                    <span>₹{getWorkerStats(selectedWorker.id).payable.toLocaleString()}</span>
+                 </div>
+            </div>
+
+            {/* Muster Roll Grid */}
+            <div className="mb-8">
+                <p className="text-[10px] font-bold uppercase mb-1">Attendance Record</p>
                 <div className="muster-grid">
-                    {getWorkerStats(selectedWorker.id).monthLog.slice(16).map((log) => (
+                    {getWorkerStats(selectedWorker.id).monthLog.map((log) => (
                         <div key={log.day} className={`muster-cell ${log.isSunday ? 'sunday-cell' : ''}`}>
-                            <div className="font-bold border-b border-black bg-gray-100">{log.day}</div>
-                            <div className="text-[8px] uppercase">{log.dayName.charAt(0)}</div>
-                            <div className="font-black text-sm">{log.status === '-' ? '' : log.status}</div>
+                            <div className="font-bold">{log.day}</div>
+                            <div className="text-[8px]">{log.dayName.charAt(0)}</div>
+                            <div className="font-black">{log.status === '-' ? '' : log.status}</div>
                         </div>
                     ))}
                 </div>
             </div>
 
-            {/* Footer Signatures */}
-            <div className="mt-16 pt-8 border-t border-black flex justify-between text-xs font-bold uppercase">
-                <div className="text-center w-32 border-t border-dotted border-black pt-2">Employee Signature</div>
-                <div className="text-center w-32 border-t border-dotted border-black pt-2">Authorized Signatory</div>
+            {/* Signatures */}
+            <div className="flex justify-between mt-20">
+                <div className="text-center w-40 border-t border-black pt-2 font-bold text-xs uppercase">Employer Signature</div>
+                <div className="text-center w-40 border-t border-black pt-2 font-bold text-xs uppercase">Worker Signature</div>
             </div>
-            <div className="text-[8px] text-center mt-4 text-gray-400">Generated by Baldigambar Tech • {new Date().toLocaleString()}</div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
     </div>
   );

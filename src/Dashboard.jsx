@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   TrendingUp, TrendingDown, Users, Truck, FileText, 
-  ArrowRight, AlertTriangle, IndianRupee, Wallet, Clock, 
-  CheckCircle, CalendarDays, Download, PieChart, Activity,
-  ChevronLeft, ChevronRight, BarChart3, Coins
+  Wallet, AlertTriangle, PieChart, Activity,
+  ChevronLeft, ChevronRight, Coins, ArrowRight
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
@@ -25,26 +24,26 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
   const [workers, setWorkers] = useState([]);
 
   useEffect(() => {
-    // 1. INVOICES (Fetch All to calculate Total Pending Dues correctly)
+    // 1. INVOICES (For "Total Billed" & "Pending" stats)
     const unsubInvoices = onValue(ref(db, 'invoices'), (snapshot) => {
       const data = snapshot.val();
       setInvoices(data ? Object.values(data) : []);
     });
 
-    // 2. CASHBOOK (Fetch Last 200 for speed, filter later)
-    const cashbookQuery = query(ref(db, 'cashbook'), limitToLast(200));
-    const unsubCashbook = onValue(cashbookQuery, (snapshot) => {
+    // 2. CASHBOOK (For "Net Profit", "Income", "Expense")
+    // We fetch all to ensure we get the full month's data
+    const unsubCashbook = onValue(ref(db, 'cashbook'), (snapshot) => {
       const data = snapshot.val();
       setCashbook(data ? Object.values(data) : []);
     });
 
-    // 3. FLEET DATA (For Fuel/Service expenses)
+    // 3. FLEET DATA (For Vehicle Count)
     const unsubFleet = onValue(ref(db, 'fleet_data'), (snapshot) => {
       const data = snapshot.val() || {};
       setFleetData(data);
     });
 
-    // 4. WORKERS (For count)
+    // 4. WORKERS (For Worker Count)
     const unsubWorkers = onValue(ref(db, 'workers'), (snapshot) => {
       const data = snapshot.val();
       setWorkers(data ? Object.values(data) : []);
@@ -57,123 +56,70 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
   }, []);
 
   // ==========================================
-  // 2. SMART CALCULATIONS (The "Refinement")
+  // 2. FIXED CALCULATIONS (Cashbook Driven)
   // ==========================================
   
   const stats = useMemo(() => {
-    let monthlyInvoiced = 0;   // Total value of bills created this month
-    let monthlyCollected = 0;  // Actual CASH received from bills this month
-    let globalPending = 0;     // Total money stuck in market (All time)
+    let monthlyBilled = 0;     // Sales (Invoices created this month)
+    let globalPending = 0;     // Money people owe you (Total)
     
-    let monthlyExpense = 0;    // Cashbook expenses
-    let monthlyOtherIncome = 0;// Cashbook income
+    let monthlyIncome = 0;     // REAL CASH IN (From Cashbook)
+    let monthlyExpense = 0;    // REAL CASH OUT (From Cashbook)
 
-    // 1. PROCESS INVOICES
+    // 1. CALCULATE CASH FLOW (Strictly from Cashbook)
+    // This fixes the double counting/messy logic.
+    cashbook.forEach(txn => {
+        if (txn.date && txn.date.startsWith(viewMonth)) {
+            const amt = Number(txn.amount) || 0;
+            if (txn.type === 'Income') {
+                monthlyIncome += amt;
+            } else if (txn.type === 'Expense') {
+                monthlyExpense += amt;
+            }
+        }
+    });
+
+    // 2. CALCULATE BILLING STATS (From Invoices)
     invoices.forEach(inv => {
-        // Calculate Grand Total of Invoice
+        // Calculate Totals
         const items = inv.items || [];
         const sub = items.reduce((s, i) => s + Number(i.amount), 0);
         const gst = inv.isGst ? (sub * (inv.gstRate || 18) / 100) : 0;
-        const discount = Number(inv.discount) || 0;
-        const grandTotal = Math.round(Math.max(0, sub + gst - discount));
-        const received = Number(inv.advances) || 0;
+        const grandTotal = Math.round(Math.max(0, sub + gst - (Number(inv.discount) || 0)));
+        
+        // Calculate Received
+        const received = (Number(inv.advances) || 0) + (inv.payments || []).reduce((sum, p) => sum + Number(p.amount), 0);
         const balance = grandTotal - received;
 
-        // GLOBAL STAT: Outstanding Dues (Money stuck in market)
-        if (balance > 0) {
-            globalPending += balance;
-        }
+        // Global Pending (All time)
+        if (balance > 0) globalPending += balance;
 
-        // MONTHLY STATS (Only if invoice belongs to selected month)
+        // Monthly Billed (Performance metric, not cash flow)
         if (inv.date.startsWith(viewMonth)) {
-            monthlyInvoiced += grandTotal;
-            monthlyCollected += received; // <--- FIX: We only count what was PAID
+            monthlyBilled += grandTotal;
         }
     });
 
-    // 2. PROCESS CASHBOOK (Month Filtered)
-    cashbook.forEach(txn => {
-        if (txn.date && txn.date.startsWith(viewMonth)) {
-            if (txn.type === 'Income') monthlyOtherIncome += Number(txn.amount);
-            if (txn.type === 'Expense') monthlyExpense += Number(txn.amount);
-        }
-    });
-
-    // 3. PROCESS FLEET EXPENSES (Month Filtered)
-    // We look inside fleet_data history arrays
-    Object.values(fleetData).forEach(vehicle => {
-        // Fuel
-        const fuel = vehicle.fuelHistory ? Object.values(vehicle.fuelHistory) : [];
-        fuel.forEach(f => {
-            if (f.date && f.date.startsWith(viewMonth)) monthlyExpense += Number(f.cost);
-        });
-        // Advances/Salary logic is usually handled in 'cashbook' if you are paying driver, 
-        // but if you track it separately, add it here.
-    });
-
-    // 4. FINAL KPI
-    // Actual Income = Cashbook Income + Collected from Invoices
-    const totalActualIncome = monthlyOtherIncome + monthlyCollected; 
-    
-    // Net Profit = Actual Income - Total Expenses
-    const netProfit = totalActualIncome - monthlyExpense;
+    // 3. NET PROFIT
+    const netProfit = monthlyIncome - monthlyExpense;
 
     return {
-        monthlyInvoiced,
-        monthlyCollected,
-        globalPending,
+        monthlyBilled,
+        monthlyIncome,
         monthlyExpense,
-        totalActualIncome,
-        netProfit
+        netProfit,
+        globalPending
     };
-  }, [invoices, cashbook, fleetData, viewMonth]);
-
-
-  // Recent Activity Feed (Merge Invoices & Expenses)
-  const recentActivity = useMemo(() => {
-    const combined = [];
-    
-    // Add Invoices
-    invoices.forEach(inv => {
-        if(inv.date.startsWith(viewMonth)) {
-            combined.push({
-                id: inv.id,
-                date: inv.date,
-                title: `Invoice #${inv.billNo}`,
-                subtitle: inv.client?.name,
-                amount: Number(inv.advances) || 0, // Show received amount
-                total: calculateInvTotal(inv),     // Show total bill amount
-                type: 'bill_payment',
-                isPaid: (calculateInvTotal(inv) - (Number(inv.advances)||0)) <= 0
-            });
-        }
-    });
-
-    // Add Expenses
-    cashbook.forEach(txn => {
-        if(txn.date.startsWith(viewMonth)) {
-            combined.push({
-                id: txn.id || Math.random(),
-                date: txn.date,
-                title: txn.category,
-                subtitle: txn.payee || txn.note || '-',
-                amount: Number(txn.amount),
-                type: txn.type === 'Income' ? 'other_income' : 'expense'
-            });
-        }
-    });
-
-    // Sort by date desc
-    return combined.sort((a,b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
   }, [invoices, cashbook, viewMonth]);
 
-  // Helper for invoice total
-  function calculateInvTotal(inv) {
-    const items = inv.items || [];
-    const sub = items.reduce((s, i) => s + Number(i.amount), 0);
-    const gst = inv.isGst ? (sub * (inv.gstRate || 18) / 100) : 0;
-    return Math.round(Math.max(0, sub + gst - (Number(inv.discount)||0)));
-  }
+
+  // Recent Activity Feed
+  const recentActivity = useMemo(() => {
+    // Only show Cashbook entries to keep it clean and matching the totals
+    const monthTxns = cashbook.filter(txn => txn.date && txn.date.startsWith(viewMonth));
+    
+    return monthTxns.sort((a,b) => new Date(b.date) - new Date(a.date) || b.timestamp - a.timestamp).slice(0, 8);
+  }, [cashbook, viewMonth]);
 
   // ==========================================
   // 3. RENDER UI
@@ -195,10 +141,10 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
                 setViewMonth(d.toISOString().slice(0,7));
             }} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800"><ChevronLeft size={20}/></button>
             
-            <div className="px-4 text-center">
+            <div className="px-4 text-center relative group">
                 <span className="text-[10px] text-slate-400 uppercase font-bold block">Period</span>
                 <span className="text-sm font-bold text-slate-700 uppercase">{new Date(viewMonth + "-01").toLocaleString('default', { month: 'long', year: 'numeric' })}</span>
-                <input type="month" value={viewMonth} onChange={e => setViewMonth(e.target.value)} className="absolute opacity-0 w-8 h-8 cursor-pointer"/>
+                <input type="month" value={viewMonth} onChange={e => setViewMonth(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"/>
             </div>
 
             <button onClick={() => {
@@ -212,25 +158,25 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
       {/* --- KPI GRID --- */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           
-          {/* 1. NET PROFIT (CASH IN HAND) */}
+          {/* 1. NET PROFIT (CASH) */}
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden group">
               <div className="absolute right-0 top-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity transform group-hover:scale-110 duration-500">
                   <Wallet size={80} />
               </div>
-              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Net Cash Profit (Month)</p>
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Net Cash Profit</p>
               <div className="flex items-baseline gap-1">
                  <h3 className={`text-3xl font-black ${stats.netProfit >= 0 ? 'text-slate-800' : 'text-red-500'}`}>
                     ₹{stats.netProfit.toLocaleString()}
                  </h3>
               </div>
               <div className="mt-4 flex items-center gap-2 text-xs font-bold bg-slate-50 w-fit px-2 py-1 rounded-lg">
-                  <span className="text-green-600 flex items-center gap-1"><TrendingUp size={12}/> In: ₹{stats.totalActualIncome.toLocaleString()}</span>
+                  <span className="text-emerald-600 flex items-center gap-1"><TrendingUp size={12}/> In: ₹{stats.monthlyIncome.toLocaleString()}</span>
                   <span className="text-slate-300">|</span>
                   <span className="text-red-500 flex items-center gap-1"><TrendingDown size={12}/> Out: ₹{stats.monthlyExpense.toLocaleString()}</span>
               </div>
           </div>
 
-          {/* 2. OUTSTANDING DUES (MARKET MONEY) */}
+          {/* 2. OUTSTANDING DUES (ASSET) */}
           <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg shadow-slate-200 relative overflow-hidden">
                <div className="absolute right-0 top-0 p-4 opacity-10">
                   <AlertTriangle size={80} />
@@ -238,39 +184,31 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Market Pending</p>
                <h3 className="text-3xl font-black text-orange-400">₹{stats.globalPending.toLocaleString()}</h3>
                <p className="text-[10px] text-slate-400 mt-2 leading-tight">
-                   *Total amount yet to be received from clients across all time.
+                   *Total amount yet to be received from clients (All time).
                </p>
           </div>
 
-          {/* 3. BUSINESS VOLUME (BILLED) */}
+          {/* 3. BUSINESS VOLUME (SALES) */}
           <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
                <div className="absolute right-0 top-0 p-4 opacity-5">
                   <FileText size={80} />
                </div>
                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Billed (Month)</p>
-               <h3 className="text-3xl font-black text-slate-800">₹{stats.monthlyInvoiced.toLocaleString()}</h3>
-               
-               {/* RECOVERY BAR */}
-               <div className="mt-4">
-                   <div className="flex justify-between text-[10px] font-bold uppercase mb-1 text-slate-400">
-                       <span>Recovery Rate</span>
-                       <span>{stats.monthlyInvoiced > 0 ? Math.round((stats.monthlyCollected / stats.monthlyInvoiced) * 100) : 0}%</span>
-                   </div>
-                   <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                       <div className="bg-emerald-500 h-full rounded-full transition-all duration-1000" style={{ width: `${stats.monthlyInvoiced > 0 ? (stats.monthlyCollected / stats.monthlyInvoiced) * 100 : 0}%` }}></div>
-                   </div>
+               <h3 className="text-3xl font-black text-slate-800">₹{stats.monthlyBilled.toLocaleString()}</h3>
+               <div className="mt-4 text-xs font-bold text-slate-400">
+                   Value of invoices created this month.
                </div>
           </div>
 
-           {/* 4. EXPENSE METRICS */}
+           {/* 4. TOTAL EXPENSE */}
            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm relative overflow-hidden">
                <div className="absolute right-0 top-0 p-4 opacity-5">
                   <PieChart size={80} />
                </div>
-               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Expenses (Month)</p>
+               <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Cash Expense</p>
                <h3 className="text-3xl font-black text-red-600">₹{stats.monthlyExpense.toLocaleString()}</h3>
                <div className="mt-4 text-xs font-bold text-slate-500">
-                   Includes Fuel, Salaries, Material Purchases & Maintenance.
+                   Fuel, Salaries, Materials, etc.
                </div>
           </div>
       </div>
@@ -278,53 +216,46 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
       {/* --- RECENT ACTIVITY & LINKS --- */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
-          {/* LEFT: RECENT ACTIVITY */}
+          {/* LEFT: RECENT CASH TRANSACTIONS */}
           <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
               <div className="p-4 border-b border-slate-100 flex justify-between items-center">
-                  <h3 className="font-bold text-slate-800 flex items-center gap-2"><Activity size={18} className="text-orange-500"/> Recent Activity</h3>
-                  <button onClick={() => setActiveTab('Billing / Invoice')} className="text-xs font-bold text-blue-600 hover:underline">View All</button>
+                  <h3 className="font-bold text-slate-800 flex items-center gap-2"><Activity size={18} className="text-orange-500"/> Cash Flow Activity</h3>
+                  <button onClick={() => setActiveTab('Business Cashbook')} className="text-xs font-bold text-blue-600 hover:underline">View All</button>
               </div>
               <div className="divide-y divide-slate-50">
                   {recentActivity.map(item => (
-                      <div key={item.id} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                      <div key={item.id || Math.random()} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
                           <div className="flex items-center gap-3">
                               <div className={`h-10 w-10 rounded-full flex items-center justify-center text-white shadow-sm
-                                  ${item.type === 'bill_payment' ? 'bg-slate-800' : 
-                                    item.type === 'expense' ? 'bg-red-500' : 'bg-emerald-500'}`}>
-                                  {item.type === 'bill_payment' ? <FileText size={18}/> : 
-                                   item.type === 'expense' ? <TrendingDown size={18}/> : <Coins size={18}/>}
+                                  ${item.type === 'Income' ? 'bg-emerald-500' : 'bg-red-500'}`}>
+                                  {item.type === 'Income' ? <TrendingUp size={18}/> : <TrendingDown size={18}/>}
                               </div>
                               <div>
-                                  <p className="text-sm font-bold text-slate-800">{item.title}</p>
-                                  <p className="text-xs text-slate-400 font-medium">{item.subtitle} • {new Date(item.date).toLocaleDateString()}</p>
+                                  <p className="text-sm font-bold text-slate-800">{item.category}</p>
+                                  <p className="text-xs text-slate-400 font-medium">{item.payee || item.note || '-'} • {new Date(item.date).toLocaleDateString()}</p>
                               </div>
                           </div>
                           <div className="text-right">
-                              {/* For Bills: Show Collected Amount. For Expense: Show Amount */}
-                              <p className={`font-black ${item.type === 'expense' ? 'text-red-500' : 'text-emerald-600'}`}>
-                                  {item.type === 'expense' ? '-' : '+'}₹{item.amount.toLocaleString()}
+                              <p className={`font-black ${item.type === 'Expense' ? 'text-red-500' : 'text-emerald-600'}`}>
+                                  {item.type === 'Expense' ? '-' : '+'}₹{Number(item.amount).toLocaleString()}
                               </p>
-                              {item.type === 'bill_payment' && (
-                                  <p className={`text-[9px] font-bold uppercase ${item.isPaid ? 'text-emerald-500' : 'text-orange-500'}`}>
-                                      {item.isPaid ? 'Fully Paid' : `Bill Value: ₹${item.total.toLocaleString()}`}
-                                  </p>
-                              )}
+                              <p className="text-[9px] font-bold text-slate-400 uppercase">{item.mode || 'Cash'}</p>
                           </div>
                       </div>
                   ))}
                   {recentActivity.length === 0 && (
-                      <div className="p-8 text-center text-slate-400 text-sm font-bold">No activity this month.</div>
+                      <div className="p-8 text-center text-slate-400 text-sm font-bold">No cash activity this month.</div>
                   )}
               </div>
           </div>
 
-          {/* RIGHT: QUICK LINKS */}
+          {/* RIGHT: QUICK ACTIONS */}
           <div className="space-y-4">
-              <div className="bg-gradient-to-br from-orange-500 to-red-600 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
+              <div onClick={() => setActiveTab('Fleet Manager')} className="bg-gradient-to-br from-orange-500 to-red-600 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden cursor-pointer hover:shadow-xl transition-shadow">
                   <div className="absolute top-0 right-0 p-4 opacity-20"><Truck size={100}/></div>
-                  <h3 className="text-lg font-black uppercase mb-1">Fleet Status</h3>
-                  <p className="text-sm font-medium opacity-90 mb-4">Manage vehicles & logs</p>
-                  <button onClick={() => setActiveTab('Fleet Manager')} className="bg-white text-orange-600 px-4 py-2 rounded-lg font-bold text-xs uppercase shadow hover:bg-slate-50">Open Fleet</button>
+                  <h3 className="text-lg font-black uppercase mb-1">Fleet Manager</h3>
+                  <p className="text-sm font-medium opacity-90 mb-4">View Fuel & Trip Logs</p>
+                  <div className="flex items-center text-xs font-bold uppercase bg-white/20 w-fit px-3 py-1 rounded-lg">Open <ArrowRight size={12} className="ml-1"/></div>
               </div>
 
               <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
@@ -337,6 +268,10 @@ export default function Dashboard({ setActiveTab, isAdmin }) {
                       <div className="flex justify-between text-sm">
                           <span className="text-slate-500 font-bold">Fleet Vehicles</span>
                           <span className="font-black text-slate-800">{Object.keys(fleetData).length}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                          <span className="text-slate-500 font-bold">Cashbook Entries</span>
+                          <span className="font-black text-slate-800">{cashbook.length}</span>
                       </div>
                   </div>
               </div>

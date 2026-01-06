@@ -4,11 +4,10 @@ import {
   User, Wrench, TrendingUp, AlertTriangle, Search, Droplet, 
   Calendar, DollarSign, FileText, ChevronDown, ChevronUp, History,
   Download, PieChart, Activity, CalendarDays, Lock,
-  ChevronLeft, ChevronRight, RefreshCw
+  ChevronLeft, ChevronRight, RefreshCw, CheckCircle
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
-// ADDED: query, orderByChild, startAt, endAt, get, increment
 import { ref, onValue, push, remove, update, set, query, orderByChild, startAt, endAt, get, increment } from 'firebase/database';
 
 export default function FleetManager({ isAdmin }) { 
@@ -43,7 +42,7 @@ export default function FleetManager({ isAdmin }) {
   const [newVehicleName, setNewVehicleName] = useState('');
 
   // ==========================================
-  // 2. LIVE CLOUD LISTENERS (OPTIMIZED)
+  // 2. LIVE CLOUD LISTENERS
   // ==========================================
   useEffect(() => {
     // 1. Listen for Entries - FILTERED BY MONTH
@@ -60,12 +59,11 @@ export default function FleetManager({ isAdmin }) {
     const unsubEntries = onValue(entriesQuery, (snapshot) => {
       const data = snapshot.val();
       const loaded = data ? Object.keys(data).map(key => ({ id: key, ...data[key] })) : [];
-      // Sort by newest first
       loaded.sort((a, b) => new Date(b.date) - new Date(a.date));
       setEntries(loaded);
     });
 
-    // 2. Listen for Fleet Data
+    // 2. Listen for Fleet Data (Fuel, Advances, Service Info)
     const dataRef = ref(db, 'fleet_data');
     const unsubData = onValue(dataRef, (snapshot) => {
       const data = snapshot.val();
@@ -97,7 +95,7 @@ export default function FleetManager({ isAdmin }) {
       unsubData();
       unsubVehicles();
     };
-  }, [viewMonth]); // Re-run when month changes
+  }, [viewMonth]); 
 
   // ==========================================
   // 3. LOGIC & CALCULATIONS
@@ -118,7 +116,7 @@ export default function FleetManager({ isAdmin }) {
     return date.toLocaleString('default', { month: 'long', year: 'numeric' });
   };
 
-  // Filter Logbook by Search (Date filtering is now handled by Firebase)
+  // Filter Logbook
   const filteredEntries = useMemo(() => {
     return entries.filter(e => {
       const matchesTab = activeTab === 'All' || e.machine === activeTab;
@@ -135,11 +133,12 @@ export default function FleetManager({ isAdmin }) {
 
   const getVehicleMonthlyStats = (vehicle) => {
       const data = fleetData[vehicle] || {};
-      const monthlyAdvances = (data.advanceHistory || []).filter(a => a.date.startsWith(viewMonth));
+      const monthlyAdvances = (data.advanceHistory || []).filter(a => a.date && a.date.startsWith(viewMonth));
       const totalAdvance = monthlyAdvances.reduce((sum, a) => sum + Number(a.amount), 0);
-      const monthlyFuel = (data.fuelHistory || []).filter(f => f.date.startsWith(viewMonth));
+      const monthlyFuel = (data.fuelHistory || []).filter(f => f.date && f.date.startsWith(viewMonth));
       const totalFuelCost = monthlyFuel.reduce((sum, f) => sum + Number(f.cost), 0);
       const totalFuelLitres = monthlyFuel.reduce((sum, f) => sum + Number(f.litres), 0);
+      
       const salary = Number(data.salary || 0);
       const maintenance = Number(data.service || 0);
 
@@ -166,8 +165,7 @@ export default function FleetManager({ isAdmin }) {
     return Object.entries(stats).sort((a,b) => b[1] - a[1]); 
   }, [filteredEntries]);
 
-  // UPDATED: Service Status now uses a dedicated 'totalRunningHours' field in fleet_data
-  // This prevents the calculation from breaking when we stop loading old entries.
+  // Service Status
   const getServiceStatus = (vehicle) => {
     const lifetimeHours = fleetData[vehicle]?.totalRunningHours || 0;
     const lastServiceAt = fleetData[vehicle]?.lastServiceHours || 0;
@@ -177,7 +175,7 @@ export default function FleetManager({ isAdmin }) {
   };
 
   // ==========================================
-  // 4. CLOUD ACTIONS
+  // 4. CLOUD ACTIONS (WITH CASHBOOK INTEGRATION)
   // ==========================================
 
   const updateVehicleData = (vehicle, field, value) => {
@@ -185,47 +183,69 @@ export default function FleetManager({ isAdmin }) {
     update(ref(db, `fleet_data/${vehicle}`), { [field]: value });
   };
 
-  // --- MIGRATION TOOL (ONE TIME USE) ---
-  const syncTotalHours = async () => {
-    if(!confirm("Recalculate total hours for all machines from history? Do this only once.")) return;
-    
-    const snapshot = await get(ref(db, 'fleet_entries'));
-    const allEntries = snapshot.val() || {};
-    const totals = {};
-    
-    Object.values(allEntries).forEach(e => {
-        if(e.machine && e.hours) {
-            totals[e.machine] = (totals[e.machine] || 0) + Number(e.hours);
-        }
-    });
-
-    Object.keys(totals).forEach(machine => {
-        update(ref(db, `fleet_data/${machine}`), { totalRunningHours: totals[machine] });
-    });
-    alert("Sync Complete! Service timers are now accurate.");
-  };
-
+  // --- THIS IS THE KEY FUNCTION FOR SYNCING ---
   const addHistoryEntry = (e, type) => {
     e.preventDefault();
     if (!isAdmin) return;
     const fd = new FormData(e.target);
-    const entry = { date: fd.get('date'), amount: Number(fd.get('amount')) };
+    
+    // Common Data
+    const date = fd.get('date');
+    const amount = Number(fd.get('amount'));
+    const entry = { date, amount };
+    const machine = advanceModalVehicle; // The currently selected vehicle (e.g., 'JCB')
 
     if (type === 'advance') {
         entry.reason = fd.get('reason');
-        push(ref(db, `fleet_data/${advanceModalVehicle}/advanceHistory`), entry);
+        
+        // 1. Add to Fleet History
+        push(ref(db, `fleet_data/${machine}/advanceHistory`), entry);
+        
+        // 2. SYNC TO CASHBOOK (EXPENSE)
+        push(ref(db, 'cashbook'), {
+            date: date,
+            type: 'Expense',
+            category: 'Salaries',
+            site: machine, 
+            payee: `${machine} Driver`,
+            amount: amount,
+            mode: 'Cash',
+            note: `Driver Advance (${machine}): ${entry.reason}`,
+            status: 'Paid',
+            timestamp: Date.now()
+        });
+        alert("Advance Added & Logged to Cashbook!");
+
     } else if (type === 'fuel') {
-        entry.cost = Number(fd.get('amount')); 
+        entry.cost = amount; 
         entry.litres = Number(fd.get('litres'));
-        delete entry.amount;
-        push(ref(db, `fleet_data/${advanceModalVehicle}/fuelHistory`), entry);
+        delete entry.amount; // Cleanup internal object
+        
+        // 1. Add to Fleet History
+        push(ref(db, `fleet_data/${machine}/fuelHistory`), entry);
+
+        // 2. SYNC TO CASHBOOK (EXPENSE)
+        // This is the part that was likely missing or broken
+        push(ref(db, 'cashbook'), {
+            date: date,
+            type: 'Expense',
+            category: 'Fuel/Travel',
+            site: machine,
+            payee: 'Petrol Pump',
+            amount: amount,
+            mode: 'Cash',
+            note: `Diesel (${machine}): ${entry.litres} Litres`,
+            status: 'Paid',
+            timestamp: Date.now()
+        });
+        alert("Fuel Added & Logged to Cashbook!");
     }
     e.target.reset();
   };
 
   const deleteHistoryEntry = (id, type) => {
     if (!isAdmin) return;
-    if(!confirm("Delete this entry?")) return;
+    if(!confirm("Delete this entry? (Note: This deletes from Fleet history only. Please delete from Cashbook manually if needed.)")) return;
     const path = type === 'advance' ? 'advanceHistory' : 'fuelHistory';
     remove(ref(db, `fleet_data/${advanceModalVehicle}/${path}/${id}`));
   };
@@ -253,7 +273,7 @@ export default function FleetManager({ isAdmin }) {
         timestamp: Date.now()
     });
 
-    // 2. Atomically Increment Total Hours (Fixes Service Interval Bug)
+    // 2. Increment Total Hours
     if (hrs > 0) {
         update(ref(db, `fleet_data/${machineName}`), {
             totalRunningHours: increment(hrs)
@@ -267,7 +287,6 @@ export default function FleetManager({ isAdmin }) {
     if (!isAdmin) return;
     if(confirm("Delete this entry?")) {
         remove(ref(db, `fleet_entries/${id}`));
-        // Decrease running hours if entry deleted
         if(hours > 0 && machine) {
             update(ref(db, `fleet_data/${machine}`), {
                 totalRunningHours: increment(-hours)
@@ -290,18 +309,31 @@ export default function FleetManager({ isAdmin }) {
     } 
   };
 
+  const syncTotalHours = async () => {
+    if(!confirm("Recalculate total hours for all machines?")) return;
+    const snapshot = await get(ref(db, 'fleet_entries'));
+    const allEntries = snapshot.val() || {};
+    const totals = {};
+    Object.values(allEntries).forEach(e => {
+        if(e.machine && e.hours) totals[e.machine] = (totals[e.machine] || 0) + Number(e.hours);
+    });
+    Object.keys(totals).forEach(machine => {
+        update(ref(db, `fleet_data/${machine}`), { totalRunningHours: totals[machine] });
+    });
+    alert("Sync Complete!");
+  };
+
   // ==========================================
   // 5. UI RENDER
   // ==========================================
   return (
     <div className={`space-y-6 pb-20 font-sans text-slate-800 animate-fade-in ${inkSaver ? 'print-ink-saver' : ''}`}>
       
-      {/* PRINT STYLES */}
       <style>{`
         @media print {
           aside, nav, header, .no-print { display: none !important; }
           main { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: 100% !important; }
-          body { background: white !important; -webkit-print-color-adjust: exact; }
+          body { background: white !important; }
           .print-area { display: block !important; width: 100%; }
           .print-ink-saver * { color: black !important; background: transparent !important; border-color: black !important; box-shadow: none !important; }
           .print-ink-saver .border-2 { border-width: 1px !important; }
@@ -310,7 +342,7 @@ export default function FleetManager({ isAdmin }) {
         }
       `}</style>
 
-      {/* --- ADVANCE/FUEL MODAL (Combined) --- */}
+      {/* --- ADVANCE/FUEL MODAL --- */}
       {advanceModalVehicle && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 print:hidden backdrop-blur-sm">
           <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden animate-fade-in max-h-[90vh] overflow-y-auto">
@@ -320,7 +352,7 @@ export default function FleetManager({ isAdmin }) {
             </div>
             <div className="p-6 space-y-8">
               
-              {/* SECTION 1: FUEL */}
+              {/* FUEL SECTION */}
               <div>
                   <h4 className="font-black text-slate-700 uppercase mb-2 flex items-center gap-2"><Droplet size={16} className="text-red-500"/> Fuel Log ({formatMonth(viewMonth)})</h4>
                   {isAdmin && (
@@ -346,7 +378,7 @@ export default function FleetManager({ isAdmin }) {
                   </table>
               </div>
 
-              {/* SECTION 2: ADVANCES */}
+              {/* ADVANCE SECTION */}
               <div>
                   <h4 className="font-black text-slate-700 uppercase mb-2 flex items-center gap-2"><DollarSign size={16} className="text-orange-500"/> Advances ({formatMonth(viewMonth)})</h4>
                   {isAdmin && (
@@ -403,22 +435,15 @@ export default function FleetManager({ isAdmin }) {
           </div>
           
           <div className="flex items-center bg-white rounded-xl p-1 border border-gray-200 shadow-sm">
-                <button onClick={() => changeMonth(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
-                    <ChevronLeft size={20} />
-                </button>
-                
+                <button onClick={() => changeMonth(-1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors"><ChevronLeft size={20} /></button>
                 <div className="relative px-2 py-1 text-center min-w-[120px] group">
                     <div className="flex flex-col items-center cursor-pointer">
                         <span className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Report Month</span>
                         <span className="text-sm font-bold text-slate-700 uppercase tracking-wider group-hover:text-orange-600 transition-colors">{formatMonth(viewMonth)}</span>
                     </div>
-                    {/* Hidden input overlay */}
                     <input type="month" value={viewMonth} onChange={(e) => setViewMonth(e.target.value)} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"/>
                 </div>
-
-                <button onClick={() => changeMonth(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors">
-                    <ChevronRight size={20} />
-                </button>
+                <button onClick={() => changeMonth(1)} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-800 transition-colors"><ChevronRight size={20} /></button>
           </div>
 
           <button onClick={() => setInkSaver(!inkSaver)} className={`p-2 rounded-xl transition-all border ${inkSaver ? 'bg-green-50 text-green-600 border-green-200' : 'bg-white text-slate-400 border-slate-200'}`} title="Ink Saver"><Droplet size={18}/></button>
@@ -447,15 +472,15 @@ export default function FleetManager({ isAdmin }) {
       {/* --- KPI DASHBOARD (MONTHLY) --- */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 no-print">
         <div className="bg-white p-4 rounded-2xl border-l-4 border-l-emerald-500 shadow-sm">
-          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Monthly Profit</div>
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Net Profit</div>
           <div className={`text-2xl font-black mt-1 ${netProfit >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>₹{netProfit.toLocaleString()}</div>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Income</div>
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total Income</div>
           <div className="text-2xl font-black mt-1 text-slate-800">₹{totalIncome.toLocaleString()}</div>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Expense</div>
+          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total Expense</div>
           <div className="text-2xl font-black mt-1 text-red-600">₹{totalExpense.toLocaleString()}</div>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
@@ -501,7 +526,6 @@ export default function FleetManager({ isAdmin }) {
 
       {/* --- LOG TABLE --- */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden mt-6 print:border-2 print:border-black print:rounded-none">
-        {/* PRINT HEADER */}
         <div className="hidden print:block p-4 text-center border-b-2 border-black">
             <h1 className="text-2xl font-black uppercase">BALDIGAMBAR ENTERPRISES</h1>
             <p className="text-xs font-bold uppercase tracking-widest mt-1">Work Report: {activeTab} • {formatMonth(viewMonth)}</p>
@@ -543,7 +567,7 @@ export default function FleetManager({ isAdmin }) {
         </table>
       </div>
 
-      {/* --- DRIVER PAYSLIPS & VEHICLE HEALTH (PRINTABLE) --- */}
+      {/* --- DRIVER PAYSLIPS (PRINTABLE) --- */}
       <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6 print:block print:space-y-8">
         {vehicles.filter(v => activeTab === 'All' || activeTab === v).map(vehicle => {
             const stats = getVehicleMonthlyStats(vehicle);
@@ -553,7 +577,6 @@ export default function FleetManager({ isAdmin }) {
 
             return (
                 <div key={vehicle} className="bg-white rounded-2xl border-2 border-slate-200 p-0 overflow-hidden shadow-sm print:border-black print:break-inside-avoid print:shadow-none mb-6">
-                    {/* Header */}
                     <div className="bg-slate-50 p-4 border-b border-slate-200 flex justify-between items-center print:bg-white print:border-black">
                         <div>
                             <h4 className="font-black text-xl uppercase text-slate-800">{vehicle}</h4>
@@ -565,13 +588,11 @@ export default function FleetManager({ isAdmin }) {
                         </div>
                     </div>
 
-                    {/* Service Bar */}
                     <div className="relative h-1 bg-slate-100 w-full print:border-b print:border-black">
                         <div className={`h-full ${service.percent > 90 ? 'bg-red-500' : 'bg-emerald-500'}`} style={{width: `${service.percent}%`}}></div>
                     </div>
 
                     <div className="p-4 grid grid-cols-2 gap-6">
-                        {/* Column 1: Pay Calculation */}
                         <div className="space-y-2 border-r border-dashed border-slate-200 pr-4 print:border-black">
                             <h5 className="text-[10px] font-bold uppercase text-slate-400 mb-2">Driver Salary</h5>
                             <div className="flex justify-between text-sm"><span className="font-bold text-slate-600">Base Salary</span><input disabled={!isAdmin} type="number" className="w-16 text-right font-bold bg-transparent border-b border-slate-200 outline-none" value={data.salary || ''} onChange={e => updateVehicleData(vehicle, 'salary', e.target.value)}/></div>
@@ -582,7 +603,6 @@ export default function FleetManager({ isAdmin }) {
                             <button onClick={()=>setAdvanceModalVehicle(vehicle)} className="w-full mt-2 text-xs font-bold text-blue-600 bg-blue-50 py-1 rounded hover:bg-blue-100 print:hidden">Manage Advances / Fuel</button>
                         </div>
 
-                        {/* Column 2: Vehicle Performance */}
                         <div className="space-y-2">
                              <h5 className="text-[10px] font-bold uppercase text-slate-400 mb-2">Machine Stats</h5>
                              <div className="flex justify-between text-xs"><span className="font-bold text-slate-600">Fuel Used</span><span className="font-bold">{stats.totalFuelLitres} Ltrs</span></div>

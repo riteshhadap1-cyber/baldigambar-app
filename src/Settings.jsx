@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Save, Upload, Trash2, Download, ShieldCheck, AlertTriangle, 
   CheckCircle, Server, Database, RefreshCw, Lock, Cloud,
-  Building, FileText, HardDrive, UserCog
+  Building, FileText, HardDrive, UserCog, User
 } from 'lucide-react';
 // FIREBASE IMPORTS
 import { db } from './firebase-config';
@@ -13,20 +13,23 @@ export default function Settings({ isAdmin }) {
   // ==========================================
   // 1. STATE & TABS
   // ==========================================
-  const [activeTab, setActiveTab] = useState('general'); // 'general', 'data', 'danger'
+  const [activeTab, setActiveTab] = useState('general'); 
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
 
-  // Business Profile State (Global Config)
+  // Business Profile State
   const [bizProfile, setBizProfile] = useState({
     name: '', tagline: '', address: '', mobile: '', 
-    gstin: '', bankName: '', accNo: '', ifsc: '', signature: null
+    gstin: '', bankName: '', accNo: '', ifsc: '', signature: null,
+    // NEW: Partner Details
+    headerName1: 'प्रो. महेश हडप', headerMobile1: '9923465353',
+    headerName2: 'प्रो. मोहन हडप', headerMobile2: '8329599213'
   });
 
   // Load Profile on Mount
   useEffect(() => {
     get(ref(db, 'biz_profile')).then(snap => {
-      if(snap.exists()) setBizProfile(snap.val());
+      if(snap.exists()) setBizProfile(prev => ({...prev, ...snap.val()}));
     });
   }, []);
 
@@ -73,20 +76,18 @@ export default function Settings({ isAdmin }) {
     setLoading(false);
   };
 
-  // --- UPDATED: SECURE RESTORE WITH VALIDATION ---
   const handleCloudRestore = (event) => {
     if (!isAdmin) return;
     const file = event.target.files[0];
     if (!file) return;
 
-    // 1. File Type Check
     if (file.type !== "application/json" && !file.name.endsWith(".json")) {
         alert("❌ Invalid file type. Please select a .json backup file.");
         return;
     }
 
     if (!confirm("⚠️ WARNING: This will REPLACE all current data with the backup. Are you sure?")) {
-        event.target.value = null; // Clear selection
+        event.target.value = null; 
         return;
     }
 
@@ -95,33 +96,25 @@ export default function Settings({ isAdmin }) {
       try {
         setLoading(true);
         setStatus('Validating backup file...');
-        
         const jsonData = JSON.parse(e.target.result);
-
-        // 2. SMART VALIDATION: Check for Critical ERP Keys
         const knownKeys = ['invoices', 'workers', 'fleet_data', 'cashbook', 'inventory_items', 'biz_profile', 'clients'];
         const hasValidData = Object.keys(jsonData).some(key => knownKeys.includes(key));
         
-        // 3. REJECT GARBAGE: Check if it looks like a package.json or config file
-        const isGarbage = jsonData.dependencies || jsonData.version || jsonData.scripts;
-
-        if (!hasValidData || isGarbage) {
-            alert("❌ RESTORE FAILED: Invalid Backup File!\n\nThe file you uploaded does not contain recognized business data (Invoices, Workers, etc.).\n\nProcess Aborted to protect your database.");
-            setStatus('❌ Restore Aborted: Invalid File');
+        if (!hasValidData) {
+            alert("❌ RESTORE FAILED: Invalid Backup File!");
+            setStatus('❌ Restore Aborted');
             setLoading(false);
             return;
         }
 
-        // 4. If Valid -> Restore
         setStatus('Uploading verified data...');
         await set(ref(db), jsonData);
         setStatus('✅ Restore Complete! Reloading...');
         setTimeout(() => window.location.reload(), 2000);
 
       } catch (err) { 
-        console.error(err);
-        setStatus('❌ Error: File is corrupted or not valid JSON.');
-        alert("❌ Error: The file is corrupted and cannot be read.");
+        setStatus('❌ Error: File is corrupted.');
+        alert("❌ Error: The file is corrupted.");
       }
       setLoading(false);
     };
@@ -196,8 +189,23 @@ export default function Settings({ isAdmin }) {
               <div><label className="text-xs font-bold text-slate-400 uppercase">Company Name</label><input disabled={!isAdmin} className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold" value={bizProfile.name} onChange={e=>setBizProfile({...bizProfile, name:e.target.value})} /></div>
               <div><label className="text-xs font-bold text-slate-400 uppercase">Tagline / Slogan</label><input disabled={!isAdmin} className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold" value={bizProfile.tagline} onChange={e=>setBizProfile({...bizProfile, tagline:e.target.value})} /></div>
               <div className="md:col-span-2"><label className="text-xs font-bold text-slate-400 uppercase">Address</label><input disabled={!isAdmin} className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold" value={bizProfile.address} onChange={e=>setBizProfile({...bizProfile, address:e.target.value})} /></div>
-              <div><label className="text-xs font-bold text-slate-400 uppercase">Mobile No</label><input disabled={!isAdmin} className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold" value={bizProfile.mobile} onChange={e=>setBizProfile({...bizProfile, mobile:e.target.value})} /></div>
+              <div><label className="text-xs font-bold text-slate-400 uppercase">Office Mobile</label><input disabled={!isAdmin} className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold" value={bizProfile.mobile} onChange={e=>setBizProfile({...bizProfile, mobile:e.target.value})} /></div>
               <div><label className="text-xs font-bold text-slate-400 uppercase">GSTIN</label><input disabled={!isAdmin} className="w-full border-2 border-slate-100 p-3 rounded-xl font-bold" value={bizProfile.gstin} onChange={e=>setBizProfile({...bizProfile, gstin:e.target.value})} /></div>
+           </div>
+           
+           {/* PARTNER HEADER CONFIG */}
+           <h3 className="text-xl font-black text-slate-800 uppercase mt-8 mb-4">Invoice Header Names</h3>
+           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 p-4 bg-slate-50 rounded-2xl border border-slate-200">
+              <div>
+                  <label className="text-xs font-bold text-slate-400 uppercase flex items-center gap-1"><User size={12}/> Left Side Name</label>
+                  <input disabled={!isAdmin} className="w-full border-2 border-slate-200 p-2 rounded-lg font-bold mb-2" value={bizProfile.headerName1} onChange={e=>setBizProfile({...bizProfile, headerName1:e.target.value})} />
+                  <input disabled={!isAdmin} className="w-full border-2 border-slate-200 p-2 rounded-lg font-bold" value={bizProfile.headerMobile1} onChange={e=>setBizProfile({...bizProfile, headerMobile1:e.target.value})} />
+              </div>
+              <div>
+                  <label className="text-xs font-bold text-slate-400 uppercase flex items-center gap-1"><User size={12}/> Right Side Name</label>
+                  <input disabled={!isAdmin} className="w-full border-2 border-slate-200 p-2 rounded-lg font-bold mb-2" value={bizProfile.headerName2} onChange={e=>setBizProfile({...bizProfile, headerName2:e.target.value})} />
+                  <input disabled={!isAdmin} className="w-full border-2 border-slate-200 p-2 rounded-lg font-bold" value={bizProfile.headerMobile2} onChange={e=>setBizProfile({...bizProfile, headerMobile2:e.target.value})} />
+              </div>
            </div>
 
            <h3 className="text-xl font-black text-slate-800 uppercase mt-8 mb-4">Banking & Signature</h3>
