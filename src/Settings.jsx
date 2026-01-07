@@ -21,7 +21,7 @@ export default function Settings({ isAdmin }) {
   const [bizProfile, setBizProfile] = useState({
     name: '', tagline: '', address: '', mobile: '', 
     gstin: '', bankName: '', accNo: '', ifsc: '', signature: null,
-    // NEW: Partner Details
+    // Partner Details
     headerName1: 'प्रो. महेश हडप', headerMobile1: '9923465353',
     headerName2: 'प्रो. मोहन हडप', headerMobile2: '8329599213'
   });
@@ -121,15 +121,32 @@ export default function Settings({ isAdmin }) {
     reader.readAsText(file);
   };
 
+  // --- UPDATED RESET FUNCTION WITH PASSWORD ---
   const handleReset = async () => {
     if (!isAdmin) return;
-    if (confirm("⚠️ DANGER: DELETE ALL DATA? This cannot be undone.")) {
-      if (confirm("Final Check: Did you download a backup?")) {
-        setLoading(true);
-        await set(ref(db), null);
-        window.location.reload();
-      }
+    
+    // 1. First Warning
+    if (!confirm("⚠️ DANGER: DELETE ALL DATA? This cannot be undone.")) return;
+    
+    // 2. Backup Check
+    if (!confirm("Final Check: Did you download a backup?")) return;
+
+    // 3. PASSWORD CHECK
+    const userPass = prompt("🔒 SECURITY CHECK: Enter Admin Password to confirm deletion:");
+    
+    // NOTE: This must match your actual admin password (default: admin123)
+    const ADMIN_PASS = "admin123"; 
+
+    if (userPass !== ADMIN_PASS) {
+        alert("❌ WRONG PASSWORD. Action Cancelled.");
+        return;
     }
+
+    // 4. Execute Delete
+    setLoading(true);
+    await set(ref(db), null);
+    alert("System Reset Successful. Reloading...");
+    window.location.reload();
   };
 
   // ==========================================
